@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Dataset, models, cache (large / generated)
+data/
+!data/
+data/*
+!data/.gitkeep
+!data/README.md
+!data/guardgpt_dataset.jsonl
+!data/guardgpt_faiss.index
+!data/guardgpt_id_map.json
+cache/
+!cache/
+cache/*
+!cache/.gitkeep
+!cache/README.md
+models/
+!mcp_server/models/
+mcp_server/models/*
+!mcp_server/models/__init__.py
+!mcp_server/models/schemas.py
+harm_only_400k_dataset.json
+*.index
+
+# Audit logs
+logs/
+!logs/
+logs/*
+!logs/.gitkeep
+!logs/README.md
+*.jsonl
+
+# Environment / secrets
+.env
+
+# Temporary backups and reports
+backup_*/
+account_classifier_*.json
+*.zip
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
