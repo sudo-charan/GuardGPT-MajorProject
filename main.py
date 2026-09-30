@@ -60,7 +60,9 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR)
     if args.status:
-        return status()
+        s = status()
+        print(json.dumps(s, indent=2))
+        return 0 if s["ready_for_local_validation"] else 1
     from agent.server_manager import MCPServerManager
     from agent.mcp_client import call_tool
     try:
@@ -109,10 +111,11 @@ def main():
                     break
                 if prompt.strip() == "/new":
                     session_id = uuid.uuid4().hex
-                    print("New session.")
+                    print("\n--- Session Reset ---")
+                    print("New session started. Safety history cleared.\n")
                     continue
                 if prompt.strip() == "/help":
-                    print("\nAvailable commands:")
+                    print("\n--- Available Commands ---")
                     print("  /help    Show this menu")
                     print("  /new     Reset session safety history")
                     print("  /status  Check system component health")
@@ -122,10 +125,10 @@ def main():
                 if prompt.strip() == "/status":
                     s = status()
                     print("\n--- System Status ---")
-                    print(f"Dataset: {'OK' if s['data_files']['dataset'] else 'MISSING'}")
+                    print(f"Dataset:      {'OK' if s['data_files']['dataset'] else 'MISSING'}")
                     print(f"Intent Model: {'OK' if s['data_files']['trained_intent_model'] else 'MISSING'}")
-                    print(f"Ollama: {'CONNECTED' if s['ollama_reachable'] else 'DISCONNECTED'}")
-                    print(f"Models: {', '.join(s['installed_models']) if s['installed_models'] else 'None'}")
+                    print(f"Ollama:       {'CONNECTED' if s['ollama_reachable'] else 'DISCONNECTED'}")
+                    print(f"Models:       {', '.join(s['installed_models']) if s['installed_models'] else 'None'}")
                     print("---------------------\n")
                     continue
                 if prompt.strip() == "/session":
@@ -134,11 +137,11 @@ def main():
                         session = report.get("session_report")
                         if session:
                             print("\n--- Session Report ---")
-                            print(f"Session ID: {session['session_id']}")
-                            print(f"Turns: {session['turn_count']}")
+                            print(f"Session ID:    {session['session_id']}")
+                            print(f"Turns:         {session['turn_count']}")
                             print(f"Intent history: {' → '.join(session['intent_history'])}")
                             print(f"Current intent: {session['current_intent']}")
-                            print(f"Session risk: {session['session_risk_score']:.2%}")
+                            print(f"Session risk:   {session['session_risk_score']:.2%}")
                             print("----------------------\n")
                         else:
                             print("\nNo session data available.\n")
@@ -151,12 +154,16 @@ def main():
                 # Compact Response Format
                 p_report = report.get("prompt_report", report)
 
+                print("\nGuardGPT:")
                 if p_report.get("response"):
-                    print(f"GuardGPT: {p_report['response']}")
+                    print(p_report['response'])
                 elif p_report.get("user_message"):
-                    print(f"GuardGPT: {p_report['user_message']}")
+                    print(p_report['user_message'])
+                else:
+                    print("(No response generated)")
 
-                print(f"[{p_report['action']} | {p_report['final_status']} | audit: {p_report['output_audit']}]")
+                print(f"\n[{p_report['action']} | {p_report['final_status']} | audit: {p_report['output_audit']}]")
+                print("\n────────────────────────────────────────────────\n")
         return 0
     except KeyboardInterrupt:
         return 0
