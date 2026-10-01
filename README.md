@@ -1,6 +1,9 @@
 # GuardGPT
 
-GuardGPT is a local prompt-safety and response-auditing system. It combines a
+> A local, layered guard for prompt safety, response auditing, and session-aware
+> observability.
+
+GuardGPT combines a
 Sentence-Transformers intent classifier, a validated dataset/FAISS evidence
 layer, deterministic jailbreak patterns, a decision engine, optional
 multi-turn history, Ollama generation, and a structured output audit.
@@ -8,6 +11,25 @@ multi-turn history, Ollama generation, and a structured output audit.
 The reporting layer is observational. It does not change classification,
 thresholds, temporal state, generation, output auditing, or the final
 `ALLOW`/`SANITIZE`/`BLOCK` decision.
+
+## At a Glance
+
+| Area | Current implementation |
+|---|---|
+| Canonical entry point | MCP `complete_request`, used by the CLI |
+| Safety authority | `core.decision_engine.DecisionEngine` |
+| Embeddings | `all-MiniLM-L6-v2`, 384 dimensions |
+| Evidence | Normalized FAISS inner-product search over 19,200 records |
+| Generation and review | Ollama/Llama through `LlamaBackend` and `OutputAuditor` |
+| Session state | `ConversationGuard` history plus observational temporal state |
+| Reports | Compact audit, prompt, session, and complete JSONL streams |
+
+### Design boundaries
+
+- The existing classifier and decision thresholds remain authoritative.
+- Dataset similarity is evidence, not a replacement classifier.
+- Temporal intent state is observational and is not a trained safety model.
+- Generated answers are released only after the configured output audit passes.
 
 ## Current Architecture
 
