@@ -166,6 +166,7 @@ class IntentClassifier:
         self._trained_head = None
         self._trained_encoder = None
         self._trained_loaded = False
+        self._last_embedding = None
 
     def _load_model(self) -> None:
         """Load Sentence-BERT model if not already loaded."""
@@ -289,15 +290,10 @@ class IntentClassifier:
         self._load_trained_safety_model()
 
         # Encode user prompt
-        query_embedding = self._model.encode(
-            [text.strip()],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        query_embedding = np.asarray(query_embedding, dtype=np.float32)
+        query_embedding = self.embed(text)
 
         # Calculate cosine similarities
-        scores = np.dot(self._intent_embeddings, query_embedding[0])
+        scores = np.dot(self._intent_embeddings, query_embedding)
 
         unsafe_intents = {
             "harmful", "self_harm", "illegal", "cyber_abuse",
@@ -407,6 +403,24 @@ class IntentClassifier:
             "intent": best_intent,
             "confidence": round(confidence, 4),
         }
+
+    def embed(self, text: str) -> np.ndarray:
+        """Return the normalized 384-dimensional embedding used for classification."""
+        if not text or not text.strip():
+            return np.zeros(384, dtype=np.float32)
+        self._initialize()
+        embedding = self._model.encode(
+            [text.strip()], convert_to_numpy=True, normalize_embeddings=True
+        )
+        embedding = np.asarray(embedding, dtype=np.float32)[0]
+        if embedding.shape != (384,):
+            raise ValueError(f"Intent embedding must have shape (384,), got {embedding.shape}")
+        self._last_embedding = embedding.copy()
+        return embedding
+
+    @property
+    def last_embedding(self) -> np.ndarray | None:
+        return None if self._last_embedding is None else self._last_embedding.copy()
 
     def predict(self, text: str) -> str:
         """Return only the predicted intent string."""

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from core.risk_estimator import SELF_HARM_CONFIDENCE, SELF_HARM_INTENTS
+from core.temporal_intent import TemporalIntentModel
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ class ConversationGuard:
         self._turn_counter = 0
         self._flagged = False
         self._flag_reason = ""
+        self.temporal_model = TemporalIntentModel()
+        self.temporal_state = None
 
     def evaluate(
         self,
@@ -198,6 +201,8 @@ class ConversationGuard:
         self._turn_counter = 0
         self._flagged = False
         self._flag_reason = ""
+        self.temporal_model.reset()
+        self.temporal_state = None
 
     def generate_session_report(self, request_id: str) -> dict:
         """Generate a session-level summary from the TurnRecord history."""

@@ -3,7 +3,6 @@
 No candidate is returned until its audit passes. No raw failed candidate is logged.
 The model-based audit reduces risk; it cannot guarantee safety or factual accuracy.
 """
-import hashlib
 import json
 import os
 import threading
@@ -42,34 +41,50 @@ class Rewrite(BaseModel):
 class AuditLog:
     def __init__(self, path=None):
         root = Path(__file__).resolve().parents[1]
-        self.path = Path(path or root / "logs" / "guardgpt_complete.jsonl")
+        self.path = Path(path or root / "logs" / "guardgpt_audit.jsonl")
         self.lock = threading.Lock()
 
-    def write(self, report):
-        # Handle dual-report structure: extract prompt_report for legacy hashing
-        if "prompt_report" in report:
-            entry = dict(report["prompt_report"])
-            # Keep routing evidence and hashes; don't persist user text or answers.
-            for key in ("prompt", "response", "sanitized_prompt"):
-                value = entry.pop(key, None)
-                if value:
-                    entry[key + "_sha256"] = hashlib.sha256(value.encode()).hexdigest()
-
-            # Append session report if present
-            if "session_report" in report:
-                entry["session_report"] = report["session_report"]
-        else:
-            entry = dict(report)
-            for key in ("prompt", "response", "sanitized_prompt"):
-                value = entry.pop(key, None)
-                if value:
-                    entry[key + "_sha256"] = hashlib.sha256(value.encode()).hexdigest()
-
+    def write(self, event):
+        """Append one compact security event without prompt or response text."""
+        entry = {
+            key: event[key]
+            for key in (
+                "timestamp", "request_id", "audit_id", "session_id", "turn_index",
+                "intent", "intent_confidence", "risk_level", "action", "final_status",
+                "allowed", "reason_codes",
+            )
+            if key in event and (event[key] is not None or key not in {"session_id", "turn_index"})
+        }
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 file.flush()
+
+
+class ReportWriter:
+    """Persist the three detailed report documents in separate JSONL files."""
+
+    def __init__(self, directory):
+        directory = Path(directory)
+        self.prompt_path = directory / "guardgpt_prompt.jsonl"
+        self.session_path = directory / "guardgpt_session.jsonl"
+        self.complete_path = directory / "guardgpt_complete.jsonl"
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _append(path, report):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(report, ensure_ascii=False) + "\n")
+            file.flush()
+
+    def write(self, prompt_report, session_report, complete_report):
+        with self.lock:
+            self._append(self.prompt_path, prompt_report)
+            if session_report is not None:
+                self._append(self.session_path, session_report)
+            self._append(self.complete_path, complete_report)
 
 
 class CompletePipeline:
@@ -79,6 +94,10 @@ class CompletePipeline:
         self.backend = backend or LlamaBackend()
         self.auditor = auditor or OutputAuditor(LlamaBackend(model=os.getenv("OLLAMA_AUDIT_MODEL") or self.backend.model))
         self.audit_log = audit_log or AuditLog()
+        audit_path = getattr(self.audit_log, "path", None)
+        if not isinstance(audit_path, (str, Path)):
+            audit_path = Path(__file__).resolve().parents[1] / "logs" / "guardgpt_audit.jsonl"
+        self.report_writer = ReportWriter(Path(audit_path).parent)
         self.retries = max(0, min(int(retries), 1))
         self.sessions = OrderedDict()
         self.lock = threading.RLock()
@@ -91,6 +110,7 @@ class CompletePipeline:
     def _run(self, prompt, session_id, check_only):
         report = dict(request_id="req_" + uuid.uuid4().hex[:12], audit_id=uuid.uuid4().hex,
             timestamp=datetime.now(timezone.utc).isoformat(), prompt=prompt,
+            session_id=session_id,
             action="BLOCK", final_status="ERROR", allowed=False, response=None,
             sanitized_prompt=None, intent="unknown", intent_confidence=0.0,
             risk_level="unknown", detected_attacks=[], reasons=[], output_audit="NOT_RUN",
@@ -107,8 +127,12 @@ class CompletePipeline:
 
         # Generate session report if session_id is provided
         session_report = None
+        session_document = None
         if session_id and session_id in self.sessions:
             session_report = self.sessions[session_id].generate_session_report(report["request_id"])
+            session_document = self._build_session_report(
+                session_report, report["audit_id"], report["timestamp"]
+            )
 
         # Structure the final output for dual reporting
         # We merge the report into the top level to maintain backward compatibility with tests
@@ -120,22 +144,116 @@ class CompletePipeline:
         })
 
         try:
-            # AuditLog expects the report to be processed for hashing.
-            # We pass the dual-report structure; AuditLog.write handles the nesting.
-            combined_for_audit = {
-                "request_id": report["request_id"],
-                "prompt_report": report,
-                "session_report": session_report,
-                "final_status": report["final_status"],
-                "allowed": report["allowed"],
-            }
-            self.audit_log.write(combined_for_audit)
+            prompt_document = self._build_prompt_report(report)
+            complete_document = self._build_complete_report(
+                report, prompt_document, session_document
+            )
+            self.report_writer.write(prompt_document, session_document, complete_document)
+            self.audit_log.write(self._build_audit_event(report, session_id))
             final_output["audit_logged"] = True
         except Exception:
             final_output.update(action="BLOCK", final_status="ERROR", allowed=False, response=None,
                 audit_logged=False, user_message="The audit log could not be saved; no generated answer was released.")
             final_output["reasons"] = report.get("reasons", []) + ["audit_log_failed"]
         return final_output
+
+    @staticmethod
+    def _build_prompt_report(report):
+        input_action = report.get("input_action", report.get("action"))
+        return {
+            "report_type": "prompt",
+            "request_id": report["request_id"],
+            "audit_id": report["audit_id"],
+            "timestamp": report["timestamp"],
+            "session_id": report.get("session_id"),
+            "turn_index": report.get("turn_index"),
+            "prompt": {
+                "text": report.get("prompt", ""),
+                "intent": report.get("intent"),
+                "intent_confidence": report.get("intent_confidence"),
+                "risk_level": report.get("risk_level"),
+            },
+            "security_analysis": {
+                "detected_attacks": report.get("detected_attacks", []),
+                "reasons": report.get("reasons", []),
+                "category_scores": report.get("category_scores", {}),
+            },
+            "dataset_evidence": {
+                "match_confidence": report.get("dataset_match_confidence"),
+                "matched_record_id": report.get("matched_record_id"),
+                "matched_intent": report.get("matched_record_intent"),
+                "matched_category_scores": report.get("matched_category_scores", {}),
+            },
+            "input_decision": {
+                "action": input_action,
+                "allowed": input_action != "BLOCK",
+            },
+            "generation": {
+                "attempts": report.get("generation_attempts", 0),
+                "mode": report.get("mode"),
+                "sanitized_prompt": report.get("sanitized_prompt"),
+            },
+            "output_audit": {"status": report.get("output_audit")},
+            "final_result": {
+                "action": report.get("action"),
+                "status": report.get("final_status"),
+                "allowed": report.get("allowed"),
+            },
+        }
+
+    @staticmethod
+    def _build_session_report(session_report, audit_id, timestamp):
+        return {
+            "report_type": "session",
+            "session_id": session_report["session_id"],
+            "request_id": session_report["request_id"],
+            "audit_id": audit_id,
+            "generated_at": timestamp,
+            "session": {
+                "turn_count": session_report["turn_count"],
+                "intent_history": session_report["intent_history"],
+                "current_intent": session_report["current_intent"],
+                "previous_intent": session_report["previous_intent"],
+                "transitions": session_report["transitions"],
+                "session_risk_score": session_report["session_risk_score"],
+            },
+            "summary": {"text": session_report["session_summary"]},
+        }
+
+    @staticmethod
+    def _build_complete_report(report, prompt_report, session_report):
+        return {
+            "report_type": "complete",
+            "request_id": report["request_id"],
+            "audit_id": report["audit_id"],
+            "timestamp": report["timestamp"],
+            "session_id": report.get("session_id"),
+            "prompt_report": prompt_report,
+            "session_report": session_report,
+            "execution": {
+                "final_action": report.get("action"),
+                "final_status": report.get("final_status"),
+                "allowed": report.get("allowed"),
+            },
+        }
+
+    @staticmethod
+    def _build_audit_event(report, session_id):
+        event = {
+            "timestamp": report["timestamp"],
+            "request_id": report["request_id"],
+            "audit_id": report["audit_id"],
+            "session_id": session_id,
+            "turn_index": report.get("turn_index"),
+            "intent": report.get("intent"),
+            "intent_confidence": report.get("intent_confidence"),
+            "risk_level": report.get("risk_level"),
+            "action": report.get("action"),
+            "final_status": report.get("final_status"),
+            "allowed": report.get("allowed"),
+            "reason_codes": report.get("reasons", []),
+        }
+        return event
 
     def _process(self, report, prompt, session_id, check_only):
         if not isinstance(prompt, str) or not prompt.strip():

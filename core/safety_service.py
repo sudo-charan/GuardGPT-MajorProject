@@ -3,6 +3,7 @@ from dataclasses import asdict
 from functools import lru_cache
 from core.decision_engine import DecisionEngine
 from core.risk_estimator import estimate_risk, should_preliminarily_block
+import numpy as np
 
 
 @lru_cache(maxsize=1)
@@ -49,6 +50,12 @@ class SafetyService:
             signal["reason_codes"].extend(patterns)
         signal["final_blocked"] = preliminary
         signal["block_reason"] = "Input safety check triggered." if preliminary else ""
+        embedding = getattr(classifier, "last_embedding", None)
+        signal["_temporal_embedding"] = (
+            np.asarray(embedding, dtype=np.float64).copy()
+            if isinstance(embedding, np.ndarray) and embedding.shape == (384,)
+            else np.zeros(384, dtype=np.float64)
+        )
         decision = asdict(self.engine.decide(signal))
         attacks = list(patterns)
         if confidence >= 0.65 and intent in {"jailbreak", "prompt_injection", "harmful", "cyber_abuse", "illegal"}:
@@ -65,4 +72,9 @@ class SafetyService:
         if history.history_triggered:
             signal.update(history_triggered=True, history_block_reason=history.history_block_reason)
             analysis["decision"] = asdict(self.engine.decide(signal, turn_index=history.turn_index))
+        update = guard.temporal_model.update(
+            signal["_temporal_embedding"], signal["dataset_match_confidence"]
+        )
+        guard.temporal_state = update
+        analysis["temporal_state"] = update
         return history.turn_index
