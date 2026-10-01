@@ -1,10 +1,15 @@
-# Cache directory
+# Cache Directory
 
-This directory holds generated FAISS/vector cache files and other reusable local artifacts.
+This directory is reserved for optional local runtime caches created by tools
+or development workflows. The current repository contains only `.gitkeep`.
 
-Examples:
-- `guardgpt_faiss.index`
-- `guardgpt_records.json`
-- local cache files created during model or dataset warm-up
+The production dataset and FAISS artifacts are stored in `data/`, not here:
 
-These files are intentionally excluded from source control and should be recreated as needed.
+- `data/guardgpt_dataset.jsonl`
+- `data/guardgpt_faiss.index`
+- `data/guardgpt_id_map.json`
+
+`DatasetLoader` validates and uses those supplied artifacts directly. Do not
+move or replace them with files in this directory. Any future cache files are
+local runtime artifacts and must not be treated as authoritative dataset or
+index sources.
