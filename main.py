@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 import uuid
 from dotenv import load_dotenv
 
@@ -19,6 +20,51 @@ DEMO = [
     ("EDUCATIONAL", "Explain how SQL injection works so I can write a tutorial for my blog."),
     ("EMPTY", ""),
 ]
+
+
+def run_agent_with_history(agent, guard, prompt, mcp_url):
+    """Compatibility helper for the separate LangGraph history tests."""
+    from agent.nodes import build_report
+
+    state = {
+        "prompt": prompt,
+        "mcp_url": mcp_url,
+        "history_triggered": False,
+        "turn_index": guard.turn_count + 1,
+    }
+    report = build_report(agent.invoke(state))
+    history = guard.evaluate_result(report)
+    if history.history_triggered:
+        state.update(
+            history_triggered=True,
+            history_block_reason=history.history_block_reason,
+            turn_index=history.turn_index,
+        )
+        report = build_report(agent.invoke(state))
+    return report
+
+
+def print_jev_style(report):
+    """Print only the concise local Jev-Style observation."""
+    jev_style = report.get("jev_style") or {}
+    choice = jev_style.get("choice") or jev_style.get("decision")
+    confidence = jev_style.get("confidence")
+    if choice is None or confidence is None:
+        print("JEV-style: unavailable")
+        return
+    print(f"JEV-style: {choice} | confidence: {float(confidence) * 100:.1f}%")
+
+
+def print_cli_summary(report):
+    """Print the professional CLI summary while reports retain full detail."""
+    prompt_report = report.get("prompt_report", report)
+    print("GuardGPT:")
+    print(prompt_report.get("response") or prompt_report.get("user_message") or "(No response generated)")
+    print(
+        f"\n[{prompt_report.get('action')} | {prompt_report.get('final_status')} "
+        f"| audit: {prompt_report.get('output_audit', 'NOT_RUN')}]"
+    )
+    print_jev_style(prompt_report)
 
 def status():
     from core.llama_backend import LlamaBackend
@@ -75,14 +121,14 @@ def main():
                     "check_only": check}, url=url, read_timeout_seconds=900).data
             if args.prompt is not None:
                 report = request(args.prompt, check=args.check)
-                print(json.dumps(report, indent=2, ensure_ascii=False))
+                print_cli_summary(report)
                 return 1 if report["final_status"] == "ERROR" else 0
             if args.pipeline:
                 failed = False
                 for label, prompt in DEMO:
                     print(f"\n[{label}] {prompt}")
                     report = request(prompt, check=True)
-                    print(json.dumps(report, indent=2, ensure_ascii=False))
+                    print_cli_summary(report)
                     failed |= report["final_status"] == "ERROR"
                 return int(failed)
             session_id = uuid.uuid4().hex
@@ -151,18 +197,7 @@ def main():
 
                 report = request(prompt, session_id, args.check)
 
-                # Compact Response Format
-                p_report = report.get("prompt_report", report)
-
-                print("\nGuardGPT:")
-                if p_report.get("response"):
-                    print(p_report['response'])
-                elif p_report.get("user_message"):
-                    print(p_report['user_message'])
-                else:
-                    print("(No response generated)")
-
-                print(f"\n[{p_report['action']} | {p_report['final_status']} | audit: {p_report['output_audit']}]")
+                print_cli_summary(report)
                 print("\n────────────────────────────────────────────────\n")
         return 0
     except KeyboardInterrupt:

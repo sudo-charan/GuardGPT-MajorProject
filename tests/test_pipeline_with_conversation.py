@@ -54,6 +54,7 @@ def _load_main_helper():
 
     fake_agent_nodes = types.ModuleType("agent.nodes")
     fake_agent_nodes.build_report = lambda report: report
+    fake_agent_nodes.__file__ = str(PROJECT_ROOT / "agent" / "nodes.py")
     sys.modules["agent.nodes"] = fake_agent_nodes
 
     fake_agent_state = types.ModuleType("agent.state")

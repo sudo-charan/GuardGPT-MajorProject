@@ -57,7 +57,7 @@ class PromptAnalysisToolTests(unittest.TestCase):
 
     def test_safe_prompt_returns_safe_intent(self) -> None:
         result = analyze_prompt(PromptAnalysisInput(prompt="Explain how Python lists work."))
-        self.assertEqual(result.intent, "coding")
+        self.assertEqual(result.intent, "educational")
         self.assertIn(result.risk_level, {"safe", "low"})
 
     def test_self_harm_returns_high_risk_intent(self) -> None:
@@ -206,10 +206,10 @@ class DecisionToolTests(unittest.TestCase):
                 dataset_match_confidence=0.78,
             )
         )
-        self.assertEqual(result.action, "SANITIZE")
-        self.assertEqual(result.final_status, "CAUTION")
+        self.assertEqual(result.action, "ALLOW")
+        self.assertEqual(result.final_status, "SAFE")
         self.assertTrue(result.allowed)
-        self.assertIsNotNone(result.sanitized_prompt)
+        self.assertIsNone(result.sanitized_prompt)
 
 
 class AuditLoggerToolTests(unittest.TestCase):

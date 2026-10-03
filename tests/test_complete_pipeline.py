@@ -27,7 +27,17 @@ class CompleteTests(unittest.TestCase):
         self.backend.generate.return_value = "Python lists are ordered collections."
         self.auditor = Mock()
         self.auditor.review.return_value = AuditVerdict(safe=True, relevant=True, categories=[])
-        self.app = CompletePipeline(self.safety, self.backend, self.auditor, AuditLog(self.path))
+        self.jev_style = Mock()
+        self.jev_style.decide.return_value = {
+            "decision": "Safe/Educational",
+            "choice": "Safe/Educational",
+            "probabilities": {"Safe/Educational": 1.0},
+            "confidence": 1.0,
+            "model": "fixture",
+            "latency_ms": 0.1,
+            "usage": None,
+        }
+        self.app = CompletePipeline(self.safety, self.backend, self.auditor, AuditLog(self.path), jev_style=self.jev_style)
 
     def test_answer_released_only_after_audit(self):
         report = self.app.run("Explain Python lists")
@@ -139,6 +149,29 @@ class CompleteTests(unittest.TestCase):
         self.safety.apply_history.return_value = 1
         self.app.run("hello", "session")
         self.safety.apply_history.assert_called_once()
+
+    def test_jev_style_result_is_observational_and_reported(self):
+        self.safety.apply_history.return_value = 1
+        report = self.app.run("hello", "session")
+        self.assertEqual(report["action"], "ALLOW")
+        self.assertEqual(report["jev_style"]["decision"], "Safe/Educational")
+        self.assertEqual(report["prompt_report"]["jev_style"]["choice"], "Safe/Educational")
+        self.assertEqual(report["session_report"]["jev_style"]["model"], "fixture")
+        self.jev_style.decide.assert_called_once()
+
+    def test_jev_style_failure_falls_back_to_existing_decision(self):
+        self.jev_style.decide.side_effect = RuntimeError("local model unavailable")
+        report = self.app.run("hello")
+        self.assertEqual(report["action"], "ALLOW")
+        self.assertEqual(report["final_status"], "SAFE")
+        self.assertEqual(report["jev_style"]["status"], "unavailable")
+
+    def test_jev_style_choice_cannot_change_existing_decision(self):
+        self.jev_style.decide.return_value["decision"] = "BLOCK"
+        self.jev_style.decide.return_value["choice"] = "BLOCK"
+        report = self.app.run("hello")
+        self.assertEqual(report["action"], "ALLOW")
+        self.assertTrue(report["allowed"])
 
     def test_auditor_strict_boolean_and_extra_fields(self):
         backend = Mock()

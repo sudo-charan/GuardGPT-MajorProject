@@ -6,6 +6,7 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+.jev-venv/
 
 # Dataset, models, cache (large / generated)
 data/

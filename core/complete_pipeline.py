@@ -4,6 +4,7 @@ No candidate is returned until its audit passes. No raw failed candidate is logg
 The model-based audit reduces risk; it cannot guarantee safety or factual accuracy.
 """
 import json
+import hashlib
 import os
 import threading
 import uuid
@@ -88,11 +89,13 @@ class ReportWriter:
 
 
 class CompletePipeline:
-    def __init__(self, safety=None, backend=None, auditor=None, audit_log=None, retries=1):
+    def __init__(self, safety=None, backend=None, auditor=None, audit_log=None, retries=1, jev_style=None):
         from core.llama_backend import LlamaBackend
+        from core.jev_style_client import JevStyleClient
         self.safety = safety or SafetyService()
         self.backend = backend or LlamaBackend()
         self.auditor = auditor or OutputAuditor(LlamaBackend(model=os.getenv("OLLAMA_AUDIT_MODEL") or self.backend.model))
+        self.jev_style = jev_style or JevStyleClient()
         self.audit_log = audit_log or AuditLog()
         audit_path = getattr(self.audit_log, "path", None)
         if not isinstance(audit_path, (str, Path)):
@@ -114,7 +117,8 @@ class CompletePipeline:
             action="BLOCK", final_status="ERROR", allowed=False, response=None,
             sanitized_prompt=None, intent="unknown", intent_confidence=0.0,
             risk_level="unknown", detected_attacks=[], reasons=[], output_audit="NOT_RUN",
-            generation_attempts=0, mode="check" if check_only else "answer")
+            generation_attempts=0, mode="check" if check_only else "answer", jev_style=None,
+            audit_attempts=[])
         try:
             self._process(report, prompt, session_id, check_only)
         except Exception as error:
@@ -130,8 +134,9 @@ class CompletePipeline:
         session_document = None
         if session_id and session_id in self.sessions:
             session_report = self.sessions[session_id].generate_session_report(report["request_id"])
+            session_report["jev_style"] = report.get("jev_style")
             session_document = self._build_session_report(
-                session_report, report["audit_id"], report["timestamp"]
+                session_report, report["audit_id"], report["timestamp"], report.get("jev_style")
             )
 
         # Structure the final output for dual reporting
@@ -193,7 +198,11 @@ class CompletePipeline:
                 "mode": report.get("mode"),
                 "sanitized_prompt": report.get("sanitized_prompt"),
             },
-            "output_audit": {"status": report.get("output_audit")},
+            "output_audit": {
+                "status": report.get("output_audit"),
+                "attempts": report.get("audit_attempts", []),
+            },
+            "jev_style": report.get("jev_style"),
             "final_result": {
                 "action": report.get("action"),
                 "status": report.get("final_status"),
@@ -202,7 +211,7 @@ class CompletePipeline:
         }
 
     @staticmethod
-    def _build_session_report(session_report, audit_id, timestamp):
+    def _build_session_report(session_report, audit_id, timestamp, jev_style=None):
         return {
             "report_type": "session",
             "session_id": session_report["session_id"],
@@ -218,6 +227,7 @@ class CompletePipeline:
                 "session_risk_score": session_report["session_risk_score"],
             },
             "summary": {"text": session_report["session_summary"]},
+            "jev_style": jev_style,
         }
 
     @staticmethod
@@ -270,6 +280,7 @@ class CompletePipeline:
                 self.sessions[session_id] = ConversationGuard(session_id)
             self.sessions.move_to_end(session_id)
             report["turn_index"] = self.safety.apply_history(analysis, self.sessions[session_id])
+        self._observe_with_jev_style(report, prompt, session_id)
         decision = analysis["decision"]
         for key in ("intent", "intent_confidence", "risk_level", "category_scores", "dataset_match_confidence", "matched_record_id"):
             report[key] = decision.get(key)
@@ -322,6 +333,15 @@ class CompletePipeline:
                 raise ValueError("Invalid or oversized model response")
             report["output_audit"] = "RUNNING"
             verdict = self.auditor.review(effective_prompt, candidate)
+            report["audit_attempts"].append({
+                "attempt": attempt + 1,
+                "safe": verdict.safe,
+                "relevant": verdict.relevant,
+                "categories": list(verdict.categories),
+                "model": getattr(getattr(self.auditor, "backend", None), "model", None),
+                "candidate_length": len(candidate),
+                "candidate_sha256": hashlib.sha256(candidate.encode("utf-8")).hexdigest(),
+            })
             if verdict.safe and verdict.relevant:
                 report.update(action=decision["action"], final_status="SAFE", allowed=True,
                     response=candidate, output_audit="PASSED", user_message="Answer passed the configured output safety review.")
@@ -330,3 +350,14 @@ class CompletePipeline:
         report.update(action="BLOCK", final_status="UNSAFE", allowed=False,
             user_message="The generated answer did not pass the output safety review.")
         report["reasons"].append("output_audit_failed")
+
+    def _observe_with_jev_style(self, report, prompt, session_id):
+        guard = self.sessions.get(session_id) if session_id else None
+        events = guard.get_recent_history() if guard else []
+        try:
+            report["jev_style"] = self.jev_style.decide(prompt, events)
+        except Exception as error:
+            report["jev_style"] = {
+                "status": "unavailable",
+                "error": type(error).__name__,
+            }
