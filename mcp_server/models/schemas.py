@@ -59,6 +59,8 @@ class ContentModerationOutput(WireModel):
 
 
 class DecisionInput(WireModel):
+    request_id: str | None = None
+    session_id: str | None = None
     prompt: str = Field(default="", max_length=6000)
     intent: str = "unknown"
     intent_confidence: float = 0.0
@@ -75,9 +77,10 @@ class DecisionInput(WireModel):
     history_triggered: StrictBool = False
     history_block_reason: str = ""
     turn_index: int = 0
+    session_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
-from typing import Any, Optional
+from typing import Optional
 
 class SessionReport(WireModel):
     session_id: str
@@ -91,11 +94,15 @@ class SessionReport(WireModel):
 
 
 class DecisionOutput(WireModel):
+    request_id: str | None = None
     action: str
     final_status: str
     allowed: StrictBool
     intent: str
     risk_level: str
+    intent_confidence: float = 0.0
+    dataset_match_confidence: float = 0.0
+    matched_record_id: str | None = None
     reason_codes: list[str] = Field(default_factory=list)
     technical_reason: str = ""
     user_message: str = ""
@@ -103,6 +110,8 @@ class DecisionOutput(WireModel):
     detected_attacks: list[str] = Field(default_factory=list)
     sanitized_prompt: Optional[str] = None
     audit_id: Optional[str] = None
+    audit_logged: StrictBool = False
+    jev_style: dict[str, Any] = Field(default_factory=dict)
     prompt_report: Optional['DecisionOutput'] = None
     session_report: Optional[SessionReport] = None
 

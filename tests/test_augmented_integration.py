@@ -150,7 +150,13 @@ class IntegrationTests(unittest.TestCase):
         payload = report.model_dump()
         self.assertEqual(payload["matched_record_intent"], "safe")
         self.assertEqual(payload["risk_level"], "safe")
-        with patch.object(decision, "_engine", return_value=self.engine):
+        from core.complete_pipeline import AuditLog
+        jev = types.SimpleNamespace(decide=lambda *args, **kwargs: {
+            "decision": "ALLOW", "classification": "Safe/Educational", "model": "fixture"
+        })
+        with TemporaryDirectory() as tmp, \
+             patch.object(decision, "_jev_style", return_value=jev), \
+             patch.object(decision, "_audit_log", return_value=AuditLog(Path(tmp) / "audit.jsonl")):
             output = decision.decide(schemas.DecisionInput(prompt="safe example", **payload))
         self.assertEqual(output.action, "ALLOW")
 

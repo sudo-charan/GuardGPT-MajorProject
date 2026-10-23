@@ -43,8 +43,10 @@ class HTTPIntegrationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             safety = Mock()
             safety.analyze.side_effect = lambda _: analysis()
+            jev_style = Mock()
+            jev_style.decide.return_value = {"decision": "ALLOW", "model": "fixture"}
             backend = LlamaBackend(base_url=f"http://127.0.0.1:{ollama.server_port}", model="fixture", timeout=5)
-            app = CompletePipeline(safety, backend, OutputAuditor(backend), AuditLog(Path(tmp)/"audit.jsonl"))
+            app = CompletePipeline(safety, backend, OutputAuditor(backend), AuditLog(Path(tmp)/"audit.jsonl"), jev_style=jev_style)
             sock = socket.socket()
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -61,10 +63,12 @@ class HTTPIntegrationTests(unittest.TestCase):
                     report = call_tool("complete_request", {"prompt": "Explain lists"}, url=url).data
                     self.assertEqual(report["response"], "Lists store ordered values.")
                     self.assertEqual(report["output_audit"], "PASSED")
+                    self.assertEqual(report["jev_style"]["decision"], "ALLOW")
                     self.assertEqual(len(calls), 2)
                     self.assertEqual(calls[0]["model"], "fixture")
                     self.assertIn("format", calls[1])
-                    safety.analyze.side_effect = lambda _: analysis("BLOCK", "jailbreak")
+                    safety.analyze.side_effect = lambda prompt: analysis(prompt, "jailbreak")
+                    jev_style.decide.return_value = {"decision": "BLOCK", "model": "fixture"}
                     blocked = call_tool("complete_request", {"prompt": "blocked"}, url=url).data
                     self.assertFalse(blocked["allowed"])
                     self.assertEqual(len(calls), 2)

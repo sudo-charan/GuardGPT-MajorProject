@@ -191,7 +191,7 @@ class IntentClassifier:
             return
         try:
             import torch
-            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             labels = checkpoint.get("labels")
             state = checkpoint.get("model_state_dict")
             if not isinstance(labels, list) or not isinstance(state, dict):
@@ -320,7 +320,10 @@ class IntentClassifier:
             "explain why", "explain the", "what are the risks",
             "explain how to", "how to recognise", "how to recognize", "how to spot",
             "how to report", "how to identify", "how to avoid", "protect user", "protect authentication",
-            "protect tokens", "protect passwords", "protect accounts"
+            "protect tokens", "protect passwords", "protect accounts",
+            "security testing", "authorized testing", "penetration testing",
+            "pentesting", "vulnerability research", "local environment",
+            "test case",
         ]
         is_safe_tech = any(kw in text_lower for kw in safe_tech_keywords)
 

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 from core.conversation_guard import ConversationGuard
 from core.safety_service import SafetyService
-from core.temporal_intent import EMBEDDING_DIM, INTENT_DIM, LABELS, TemporalIntentModel
+from core.temporal_intent import LABELS, TemporalIntentModel
 
 
 class TemporalIntentTests(unittest.TestCase):
@@ -101,10 +101,9 @@ class TemporalIntentTests(unittest.TestCase):
         classifier.classify.return_value = {"intent": "coding", "confidence": 0.9}
         service = SafetyService(lambda: (loader, classifier))
         analysis = service.analyze("Explain lists")
-        original_action = analysis["decision"]["action"]
         guard = ConversationGuard("observational")
-        service.apply_history(analysis, guard)
-        self.assertEqual(analysis["decision"]["action"], original_action)
+        service.apply_history(analysis, guard, "ALLOW")
+        self.assertEqual(guard.history[0].is_blocked, False)
         self.assertIsNotNone(analysis["temporal_state"])
 
     def test_input_validation(self):

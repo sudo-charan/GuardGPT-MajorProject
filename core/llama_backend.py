@@ -11,6 +11,16 @@ DEFAULT_TIMEOUT = 120
 DEFAULT_TEMPERATURE = 0.2
 
 
+class OllamaHTTPError(RuntimeError):
+    """Sanitized non-success response from Ollama; never stores its response body."""
+
+    diagnostic_category = "ollama_http_error"
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__("Ollama returned an HTTP error.")
+
+
 class LlamaBackend:
     """Ollama backend REST client."""
 
@@ -79,7 +89,7 @@ class LlamaBackend:
             raise RuntimeError("Ollama generation failed or timed out.") from error
 
         if response.status_code != 200:
-            raise RuntimeError(f"Ollama returned HTTP {response.status_code}. Check installed models.")
+            raise OllamaHTTPError(response.status_code)
 
         data = response.json()
         if not isinstance(data, dict) or not isinstance(data.get("response"), str):

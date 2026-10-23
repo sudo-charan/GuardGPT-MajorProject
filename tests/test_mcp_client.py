@@ -39,7 +39,6 @@ for path_str in (str(PROJECT_ROOT), str(MCP_SERVER_DIR), str(AGENT_DIR)):
 
 from agent.mcp_client import (  # noqa: E402
     MCP_SERVER_URL,
-    MCPClientError,
     MCPConnectionError,
     MCPToolError,
     ToolResult,
@@ -76,6 +75,9 @@ class _MCPServerProcess:
         self.port = port
         self.process: subprocess.Popen | None = None
         self.log_path = Path(os.getenv("TEMP", "/tmp")) / f"mcp_server_mcp_client_{port}.log"
+        temp_dir = Path(os.getenv("TEMP", "/tmp"))
+        self.audit_path = temp_dir / f"guardgpt_mcp_client_{os.getpid()}_{port}_audit.jsonl"
+        self.trace_path = temp_dir / f"guardgpt_mcp_client_{os.getpid()}_{port}_trace.jsonl"
         self.url = f"http://127.0.0.1:{port}/mcp"
 
     def start(self) -> None:
@@ -84,6 +86,8 @@ class _MCPServerProcess:
             str(PROJECT_ROOT) + os.pathsep + str(MCP_SERVER_DIR)
         )
         env["GUARDGPT_PROJECT_ROOT"] = str(PROJECT_ROOT)
+        env["GUARDGPT_AUDIT_LOG_PATH"] = str(self.audit_path)
+        env["GUARDGPT_DIAGNOSTIC_TRACE_PATH"] = str(self.trace_path)
         env["GUARDGPT_MCP_URL"] = self.url
 
         log_file = open(self.log_path, "wb")

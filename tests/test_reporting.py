@@ -1,14 +1,19 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from core.complete_pipeline import AuditLog, CompletePipeline
+from core.complete_pipeline import AuditLog, CompletePipeline, ReportWriter
 from core.output_auditor import AuditVerdict
+from core.safety_service import SafetyService
 
 
 class FakeSafety:
+    def __init__(self):
+        self._finalizer = SafetyService()
+
     def analyze(self, prompt):
         blocked = "ignore all previous" in prompt.lower()
         intent = "prompt_injection" if blocked else {
@@ -17,10 +22,9 @@ class FakeSafety:
             "Explain one weakness.": "coding",
             "How could someone exploit it?": "cyber_abuse",
         }.get(prompt, "coding")
-        action = "BLOCK" if blocked else "ALLOW"
         return {
-            "decision": {
-                "action": action,
+            "signal": {
+                "prompt": prompt,
                 "intent": intent,
                 "intent_confidence": 0.85,
                 "risk_level": "high" if blocked else "safe",
@@ -28,24 +32,17 @@ class FakeSafety:
                 "category_scores": {},
                 "dataset_match_confidence": 0.42,
                 "matched_record_id": "record-1",
-                "user_message": "Blocked" if blocked else "Allowed",
-            },
-            "signal": {
-                "prompt": prompt,
-                "intent": intent,
-                "intent_confidence": 0.85,
-                "risk_level": "high" if blocked else "safe",
-                "dataset_match_confidence": 0.42,
-                "category_scores": {},
-                "final_blocked": blocked,
+                "preliminary_block": blocked,
                 "matched_record_intent": "prompt_injection" if blocked else "safe",
             },
             "detected_attacks": ["instruction_override"] if blocked else [],
             "matched_category_scores": {},
         }
 
-    def apply_history(self, analysis, guard):
-        return guard.evaluate_result(analysis["signal"]).turn_index
+    def finalize_turn(self, analysis, guard, action, status, *, qualifies_for_recovery=False):
+        return self._finalizer.finalize_turn(
+            analysis, guard, action, status, qualifies_for_recovery=qualifies_for_recovery
+        )
 
 
 class ReportingTests(unittest.TestCase):
@@ -56,8 +53,13 @@ class ReportingTests(unittest.TestCase):
         backend = Mock(model="test")
         auditor = Mock()
         auditor.review.return_value = AuditVerdict(safe=True, relevant=True, categories=[])
+        jev = Mock()
+        jev.decide.side_effect = lambda prompt, events, analysis: {
+            "decision": "BLOCK" if "ignore all previous" in prompt.lower() else "ALLOW",
+            "model": "fixture",
+        }
         self.app = CompletePipeline(
-            FakeSafety(), backend, auditor, AuditLog(self.root / "guardgpt_audit.jsonl")
+            FakeSafety(), backend, auditor, AuditLog(self.root / "guardgpt_audit.jsonl"), jev_style=jev
         )
 
     def _records(self, name):
@@ -97,9 +99,11 @@ class ReportingTests(unittest.TestCase):
             "Explain one weakness.",
             "How could someone exploit it?",
         ]
-        for prompt in prompts:
-            self.app.run(prompt, session_id="A", check_only=True)
-        self.app.run("Explain web authentication.", session_id="B", check_only=True)
+        for index, prompt in enumerate(prompts, start=1):
+            result = self.app.run(prompt, session_id="A", check_only=True)
+            self.assertEqual(result["turn_index"], index)
+        result_b = self.app.run("Explain web authentication.", session_id="B", check_only=True)
+        self.assertEqual(result_b["turn_index"], 1)
         sessions = self._records("guardgpt_session.jsonl")
         session_a, session_b = sessions[-2:]
         self.assertEqual(session_a["report_type"], "session")
@@ -126,9 +130,25 @@ class ReportingTests(unittest.TestCase):
         self.assertTrue(audit)
         self.assertTrue(all(set(item) <= {
             "timestamp", "request_id", "audit_id", "session_id", "turn_index",
-            "intent", "intent_confidence", "risk_level", "action", "final_status",
-            "allowed", "reason_codes",
+            "intent", "intent_confidence", "risk_level", "action", "input_action",
+            "jev_style_recheck_action", "final_status", "allowed", "reason_codes",
+            "decision_source",
         } for item in audit))
+
+    def test_prompt_report_persistence_can_be_disabled(self):
+        private_prompt = "private-prompt-that-must-not-be-persisted"
+        with patch.dict(os.environ, {"GUARDGPT_PERSIST_PROMPT_REPORTS": "false"}):
+            self.app.report_writer = ReportWriter(self.root)
+            result = self.app.run(private_prompt, session_id="privacy-session", check_only=True)
+
+        self.assertEqual(result["prompt"], private_prompt)
+        self.assertFalse((self.root / "guardgpt_prompt.jsonl").exists())
+        self.assertFalse((self.root / "guardgpt_complete.jsonl").exists())
+        session_records = self._records("guardgpt_session.jsonl")
+        self.assertEqual(len(session_records), 1)
+        self.assertNotIn(private_prompt, json.dumps(session_records))
+        audit_contents = (self.root / "guardgpt_audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn(private_prompt, audit_contents)
 
 
 if __name__ == "__main__":

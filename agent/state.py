@@ -19,6 +19,8 @@ class GuardState(TypedDict, total=False):
     # Input
     # ----------------------------------------------------------
     request_id: str
+    session_id: str
+    session_events: list[dict[str, Any]]
     prompt: str
     mcp_url: Optional[str]
 

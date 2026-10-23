@@ -57,8 +57,21 @@ class ConversationGuard:
         self._turn_counter = 0
         self._flagged = False
         self._flag_reason = ""
+        self._benign_streak = 0
         self.temporal_model = TemporalIntentModel()
         self.temporal_state = None
+
+    def update_behavioral_state(self, qualifies_for_recovery: bool) -> None:
+        """Track consecutive completed requests that qualify for recovery."""
+        if not qualifies_for_recovery:
+            self._benign_streak = 0
+            return
+
+        self._benign_streak += 1
+        if self._benign_streak >= 5:
+            self._flagged = False
+            self._flag_reason = ""
+            self._benign_streak = 0
 
     def evaluate(
         self,
@@ -71,30 +84,6 @@ class ConversationGuard:
         category_scores: dict | None = None,
         block_reason: str = "",
     ) -> ConversationResult:
-        current_turn = self._turn_counter + 1
-
-        if self._flagged:
-            history_reason = "Conversation session was flagged due to repeated unsafe activity."
-            self._save_turn(
-                prompt=prompt,
-                intent=intent,
-                intent_confidence=intent_confidence,
-                risk_level=risk_level,
-                is_blocked=True,
-                block_reason=history_reason,
-                semantic_similarity=semantic_similarity,
-                category_scores=category_scores,
-            )
-            return ConversationResult(
-                history_triggered=True,
-                history_block_reason=history_reason,
-                unsafe_ratio=self._unsafe_ratio(),
-                previous_block=True,
-                session_flagged=True,
-                session_flag_reason=self._flag_reason,
-                turn_index=current_turn,
-            )
-
         previous_block = any(turn.is_blocked for turn in self._history)
         history_triggered = False
         history_reason = ""
@@ -129,7 +118,7 @@ class ConversationGuard:
         )
 
         ratio = self._unsafe_ratio()
-        if len(self._history) >= MIN_HISTORY_FOR_RATIO and ratio >= UNSAFE_RATIO_FLAG:
+        if final_blocked and len(self._history) >= MIN_HISTORY_FOR_RATIO and ratio >= UNSAFE_RATIO_FLAG:
             self._flagged = True
             self._flag_reason = "Repeated unsafe messages detected."
 
@@ -159,6 +148,45 @@ class ConversationGuard:
             ),
             category_scores=self._get_value(result, "category_scores", {}),
             block_reason=self._get_value(result, "block_reason", ""),
+        )
+
+    def record_decision(
+        self,
+        *,
+        prompt: str,
+        intent: str,
+        intent_confidence: float,
+        risk_level: str,
+        is_blocked: bool,
+        semantic_similarity: float = 0.0,
+        category_scores: dict | None = None,
+        block_reason: str = "",
+    ) -> ConversationResult:
+        """Record the action already chosen by JEV-Style without changing it."""
+        previous_block = any(turn.is_blocked for turn in self._history)
+        self._save_turn(
+            prompt=prompt,
+            intent=intent,
+            intent_confidence=intent_confidence,
+            risk_level=risk_level,
+            is_blocked=is_blocked,
+            block_reason=block_reason if is_blocked else "",
+            semantic_similarity=semantic_similarity,
+            category_scores=category_scores,
+        )
+
+        ratio = self._unsafe_ratio()
+        if is_blocked and len(self._history) >= MIN_HISTORY_FOR_RATIO and ratio >= UNSAFE_RATIO_FLAG:
+            self._flagged = True
+            self._flag_reason = "Repeated unsafe messages detected."
+        return ConversationResult(
+            history_triggered=False,
+            history_block_reason="",
+            unsafe_ratio=ratio,
+            previous_block=previous_block,
+            session_flagged=self._flagged,
+            session_flag_reason=self._flag_reason,
+            turn_index=self._turn_counter,
         )
 
     def _save_turn(
@@ -201,6 +229,7 @@ class ConversationGuard:
         self._turn_counter = 0
         self._flagged = False
         self._flag_reason = ""
+        self._benign_streak = 0
         self.temporal_model.reset()
         self.temporal_state = None
 

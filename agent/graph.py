@@ -19,10 +19,10 @@ ContentModeration   (MCP tool)
 CombineResults
   |
   v
-Decision            (MCP tool - thin wrapper around core.decision_engine)
+Decision            (MCP tool - JEV-Style action decision)
   |
   v
-AuditLog            (MCP tool)
+AuditLog            (decision audit result)
   |
   v
 BuildReport
@@ -30,8 +30,8 @@ BuildReport
   v
 END
 
-The Agent MUST NOT do its own classification; it only coordinates the
-MCP tools that wrap the existing GuardGPT core.
+The Agent MUST NOT do its own classification or action selection; it only
+coordinates MCP analysis tools and the JEV-Style decision tool.
 """
 
 from __future__ import annotations

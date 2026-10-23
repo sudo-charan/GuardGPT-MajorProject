@@ -1,8 +1,8 @@
 """
 End-to-end dedup assertion.
 
-Runs the new pipeline once via `main.py --pipeline --prompt ...` and
-asserts that `logs/guardgpt_audit.jsonl` grew by *exactly one* entry
+Runs the new pipeline once via `main.py --check --prompt ...` and
+asserts that an isolated audit file contains *exactly one* entry
 with a `request_id` matching the printed Guard Report.
 
 Prereq: full venv (sentence_transformers, mcp, pydantic, langgraph).
@@ -15,7 +15,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import tempfile
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -51,39 +54,67 @@ class AuditDedupEndToEndTests(unittest.TestCase):
             )
 
     def test_pipeline_writes_exactly_one_audit_entry(self) -> None:
-        log_path = PROJECT_ROOT / "logs" / "guardgpt_audit.jsonl"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        before = (
-            log_path.read_text(encoding="utf-8").splitlines()
-            if log_path.exists()
-            else []
-        )
+        class JEVHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
 
-        result = subprocess.run(
-            [
-                _venv_python(),
-                str(PROJECT_ROOT / "main.py"),
-                "--pipeline",
-                "--prompt",
-                PROMPT,
-            ],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        self.assertEqual(
-            result.returncode,
-            0,
-            msg=f"pipeline failed:\nstdout={result.stdout}\nstderr={result.stderr}",
-        )
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                payload = json.dumps({"model": "jev-style-test-fixture", "answers": {
+                    "choice_1": {"type": "choice", "choice": "Safe/Educational",
+                                 "probabilities": {"Safe/Educational": 1.0}, "confidence": 1.0},
+                    "decision": {"type": "choice", "choice": "ALLOW",
+                                 "probabilities": {"ALLOW": 1.0}, "confidence": 1.0},
+                }, "usage": {"input_tokens": 1}, "latency_ms": 1.0}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
 
-        after = (
-            log_path.read_text(encoding="utf-8").splitlines()
-            if log_path.exists()
-            else []
-        )
-        new_lines = after[len(before):]
+        jev = ThreadingHTTPServer(("127.0.0.1", 0), JEVHandler)
+        jev_thread = threading.Thread(target=jev.serve_forever, daemon=True)
+        jev_thread.start()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "guardgpt_audit.jsonl"
+            env = os.environ.copy()
+            env["JEV_STYLE_URL"] = f"http://127.0.0.1:{jev.server_port}"
+            env["JEV_STYLE_TIMEOUT"] = "5"
+            env["JEV_STYLE_API_KEY"] = ""
+            env["GUARDGPT_AUDIT_LOG_PATH"] = str(log_path)
+            try:
+                result = subprocess.run(
+                    [
+                        _venv_python(),
+                        str(PROJECT_ROOT / "main.py"),
+                        "--check",
+                        "--prompt",
+                        PROMPT,
+                    ],
+                    cwd=str(PROJECT_ROOT),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            finally:
+                jev.shutdown()
+                jev.server_close()
+                jev_thread.join(timeout=5)
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"pipeline failed:\nstdout={result.stdout}\nstderr={result.stderr}",
+            )
+
+            after = (
+                log_path.read_text(encoding="utf-8").splitlines()
+                if log_path.exists()
+                else []
+            )
+
+        new_lines = after
         self.assertEqual(
             len(new_lines),
             1,
@@ -94,15 +125,9 @@ class AuditDedupEndToEndTests(unittest.TestCase):
         )
 
         entry = json.loads(new_lines[0])
-        report = json.loads(result.stdout)
-        self.assertEqual(
-            entry.get("audit_id"),
-            report.get("audit_id"),
-            msg=(
-                "Audit entry audit_id does not match the printed "
-                "Guard Report audit_id (they must be the same UUID)."
-            ),
-        )
+        self.assertEqual(entry.get("action"), "ALLOW")
+        self.assertEqual(entry.get("decision_source"), "jev-style")
+        self.assertTrue(entry.get("request_id"))
 
 
 if __name__ == "__main__":

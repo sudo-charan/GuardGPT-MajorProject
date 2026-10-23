@@ -4,7 +4,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import sys
 import uuid
 from dotenv import load_dotenv
 
@@ -45,19 +44,25 @@ def run_agent_with_history(agent, guard, prompt, mcp_url):
 
 
 def print_jev_style(report):
-    """Print only the concise local Jev-Style observation."""
+    """Print the action and classification returned by local JEV-Style."""
     jev_style = report.get("jev_style") or {}
-    choice = jev_style.get("choice") or jev_style.get("decision")
+    action = jev_style.get("decision")
+    classification = jev_style.get("classification") or jev_style.get("choice")
     confidence = jev_style.get("confidence")
-    if choice is None or confidence is None:
+    if action is None:
         print("JEV-style: unavailable")
         return
-    print(f"JEV-style: {choice} | confidence: {float(confidence) * 100:.1f}%")
+    detail = f" | classification: {classification}" if classification else ""
+    confidence_text = f" | action confidence: {float(confidence) * 100:.1f}%" if confidence is not None else ""
+    print(f"JEV-style: {action}{detail}{confidence_text}")
 
 
 def print_cli_summary(report):
     """Print the professional CLI summary while reports retain full detail."""
-    prompt_report = report.get("prompt_report", report)
+    if report.get("final_status") in {"ERROR", "DECISION_UNAVAILABLE"}:
+        prompt_report = report
+    else:
+        prompt_report = report.get("prompt_report", report)
     print("GuardGPT:")
     print(prompt_report.get("response") or prompt_report.get("user_message") or "(No response generated)")
     print(
@@ -68,7 +73,6 @@ def print_cli_summary(report):
 
 def status():
     from core.llama_backend import LlamaBackend
-    import requests
     jsonl = Path(os.getenv("GUARDGPT_DATASET", ROOT / "data" / "guardgpt_dataset.jsonl"))
     root_jsonl = ROOT / "guardgpt_dataset.jsonl"
     result = {"data_files": {
@@ -122,14 +126,14 @@ def main():
             if args.prompt is not None:
                 report = request(args.prompt, check=args.check)
                 print_cli_summary(report)
-                return 1 if report["final_status"] == "ERROR" else 0
+                return 1 if report["final_status"] in {"ERROR", "DECISION_UNAVAILABLE"} else 0
             if args.pipeline:
                 failed = False
                 for label, prompt in DEMO:
                     print(f"\n[{label}] {prompt}")
                     report = request(prompt, check=True)
                     print_cli_summary(report)
-                    failed |= report["final_status"] == "ERROR"
+                    failed |= report["final_status"] in {"ERROR", "DECISION_UNAVAILABLE"}
                 return int(failed)
             session_id = uuid.uuid4().hex
 

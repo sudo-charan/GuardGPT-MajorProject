@@ -3,8 +3,8 @@ GuardGPT Agent nodes.
 
 Each node is a thin function over the MCP client. The Agent does NOT
 implement its own safety classifier, jailbreak detector, content
-moderator, or decision engine. Those live in the GuardGPT core and are
-exposed through MCP tools.
+moderator, or prompt-action decision. The decision tool asks JEV-Style
+for the final action after receiving the combined analysis evidence.
 
 Workflow:
 
@@ -26,7 +26,7 @@ Workflow:
     Decision         -> MCP tool: decision
         |
         v
-    AuditLog         -> MCP tool: audit_logger
+    AuditLog         -> capture audit result returned by decision tool
         |
         v
     BuildReport      -> final Guard Report
@@ -55,9 +55,7 @@ from agent.state import GuardState
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
 # Helpers
-# ============================================================
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -103,10 +101,6 @@ def _prompt_argument(prompt: str) -> dict[str, Any]:
     return {"data": {"prompt": prompt}}
 
 
-# ============================================================
-# Node 1: ReceivePrompt
-# ============================================================
-
 def receive_prompt(state: GuardState) -> GuardState:
     """Initialize the workflow state for a new prompt."""
     if not state.get("request_id"):
@@ -116,10 +110,6 @@ def receive_prompt(state: GuardState) -> GuardState:
     state["completed"] = False
     return state
 
-
-# ============================================================
-# Node 2: PromptAnalysis
-# ============================================================
 
 def run_prompt_analysis(state: GuardState) -> GuardState:
     """Call MCP `prompt_analysis` and store its result in state."""
@@ -145,10 +135,6 @@ def run_prompt_analysis(state: GuardState) -> GuardState:
     return state
 
 
-# ============================================================
-# Node 3: JailbreakDetection
-# ============================================================
-
 def run_jailbreak_detection(state: GuardState) -> GuardState:
     """Call MCP `jailbreak_detection`."""
     prompt = state.get("prompt", "") or ""
@@ -159,10 +145,6 @@ def run_jailbreak_detection(state: GuardState) -> GuardState:
     )
     return state
 
-
-# ============================================================
-# Node 4: ContentModeration
-# ============================================================
 
 def run_content_moderation(state: GuardState) -> GuardState:
     """Call MCP `content_moderation`."""
@@ -175,14 +157,10 @@ def run_content_moderation(state: GuardState) -> GuardState:
     return state
 
 
-# ============================================================
-# Node 5: CombineResults
-# ============================================================
-
 def combine_results(state: GuardState) -> GuardState:
     """
-    Merge the three analysis outputs into a single payload to feed the
-    DecisionEngine MCP tool.
+    Merge the three analysis outputs into evidence for the JEV-Style MCP
+    decision tool.
 
     The combination preserves the original signals - it does NOT
     classify anything new. It just unifies categories / detected attacks /
@@ -249,10 +227,6 @@ def combine_results(state: GuardState) -> GuardState:
     return state
 
 
-# ============================================================
-# Node 6: Decision
-# ============================================================
-
 def run_decision(state: GuardState) -> GuardState:
     """Call MCP `decision` with the combined analysis."""
     combined = state.get("combined_analysis") or {}
@@ -260,6 +234,8 @@ def run_decision(state: GuardState) -> GuardState:
 
     decision_input = {
         "data": {
+            "request_id": state.get("request_id"),
+            "session_id": state.get("session_id"),
             "prompt": prompt,
             "intent": combined.get("intent", "unknown"),
             "intent_confidence": combined.get("intent_confidence", 0.0),
@@ -270,9 +246,11 @@ def run_decision(state: GuardState) -> GuardState:
             "category_scores": combined.get("category_scores", {}),
             "detected_attacks": combined.get("detected_attacks", []),
             "reasons": combined.get("reasons", []),
+            "evidence": combined.get("reasons", []),
             "history_triggered": combined.get("history_triggered", False),
             "history_block_reason": combined.get("history_block_reason", ""),
             "turn_index": combined.get("turn_index", 0),
+            "session_events": state.get("session_events", []),
         }
     }
 
@@ -280,27 +258,21 @@ def run_decision(state: GuardState) -> GuardState:
     return state
 
 
-# ============================================================
-# Node 7: AuditLog
-# ============================================================
-
 def run_audit_log(state: GuardState) -> GuardState:
     """
-    No-op audit step.
+    Record the audit result produced synchronously by the MCP decision tool.
 
-    `audit_id` is generated by `core.decision_engine.DecisionEngine.decide()`
-    and surfaced via `state["decision_output"]["audit_id"]`. The MCP
-    `audit_logger` tool is now a stub; this node exists to preserve the
-    graph shape and set the final `completed` flag.
+    Keeping this node preserves the public graph shape. The decision tool
+    writes its JEV-Style action before returning, including failure actions.
     """
-    state["audit_output"] = {}
+    decision = state.get("decision_output") or {}
+    state["audit_output"] = {
+        "success": bool(decision.get("audit_logged", False)),
+        "audit_id": decision.get("audit_id"),
+    }
     state["completed"] = True
     return state
 
-
-# ============================================================
-# Node 8: BuildReport
-# ============================================================
 
 def build_report_node(state: GuardState) -> GuardState:
     """Final node - flatten the workflow state into a Guard Report."""
@@ -316,13 +288,10 @@ def build_report_node(state: GuardState) -> GuardState:
         "final_status": report.get("final_status", "SAFE"),
         "sanitized_prompt": report.get("sanitized_prompt"),
         "audit_id": report.get("audit_id"),
+        "jev_style": report.get("jev_style"),
     })
     return state
 
-
-# ============================================================
-# Guard Report builder (shared by Audit and Report nodes)
-# ============================================================
 
 def build_report(state: GuardState) -> dict[str, Any]:
     """
@@ -338,7 +307,7 @@ def build_report(state: GuardState) -> dict[str, Any]:
       - detected_attacks
       - reasons
       - action        (ALLOW | SANITIZE | BLOCK)
-      - final_status  (SAFE | CAUTION | UNSAFE)
+      - final_status  (SAFE | CAUTION | UNSAFE | DECISION_UNAVAILABLE)
       - sanitized_prompt
       - audit_id
       - timestamp
@@ -387,6 +356,7 @@ def build_report(state: GuardState) -> dict[str, Any]:
     return {
         "request_id": state.get("request_id"),
         "prompt": state.get("prompt", ""),
+        "session_id": state.get("session_id"),
         "timestamp": _now_iso(),
         "intent": decision.get("intent")
         or combined.get("intent")
@@ -409,4 +379,6 @@ def build_report(state: GuardState) -> dict[str, Any]:
         "allowed": allowed,
         "sanitized_prompt": sanitized_prompt,
         "audit_id": audit_id,
+        "audit_logged": bool(decision.get("audit_logged", False)),
+        "jev_style": decision.get("jev_style", {}),
     }

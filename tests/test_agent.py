@@ -14,12 +14,15 @@ These tests verify:
 from __future__ import annotations
 
 import os
+import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unittest
 from contextlib import closing
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -40,6 +43,39 @@ for path_str in (str(PROJECT_ROOT), str(MCP_SERVER_DIR), str(AGENT_DIR)):
 from agent.graph import agent, build_agent_graph  # noqa: E402
 from agent.nodes import build_report  # noqa: E402
 from agent.state import GuardState  # noqa: E402
+
+
+class _JEVHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        prompt = body["state"]["current_instruction"].lower()
+        blocked = any(term in prompt for term in (
+            "ignore all previous", "kill myself", "end my life", "seriously injure",
+            "murder someone", "without leaving evidence",
+        ))
+        action = "BLOCK" if blocked else "ALLOW"
+        classification = "Jailbreak" if "ignore all previous" in prompt else (
+            "Harmful Instructions" if blocked else "Safe/Educational"
+        )
+        response = json.dumps({
+            "model": "jev-style-test-fixture",
+            "answers": {
+                "choice_1": {"type": "choice", "choice": classification,
+                             "probabilities": {classification: 1.0}, "confidence": 1.0},
+                "decision": {"type": "choice", "choice": action,
+                             "probabilities": {action: 1.0}, "confidence": 1.0},
+            },
+            "usage": {"input_tokens": 1},
+            "latency_ms": 1.0,
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
 
 
 def _free_port() -> int:
@@ -67,15 +103,23 @@ class _MCPServerProcess:
         self.port = port
         self.process: subprocess.Popen | None = None
         self.log_path = Path(os.getenv("TEMP", "/tmp")) / f"mcp_server_agent_{port}.log"
+        temp_dir = Path(os.getenv("TEMP", "/tmp"))
+        self.audit_path = temp_dir / f"guardgpt_agent_{os.getpid()}_{port}_audit.jsonl"
+        self.trace_path = temp_dir / f"guardgpt_agent_{os.getpid()}_{port}_trace.jsonl"
         self.url = f"http://127.0.0.1:{port}/mcp"
 
-    def start(self) -> None:
+    def start(self, jev_url: str) -> None:
         env = os.environ.copy()
         env["PYTHONPATH"] = (
             str(PROJECT_ROOT) + os.pathsep + str(MCP_SERVER_DIR)
         )
         env["GUARDGPT_PROJECT_ROOT"] = str(PROJECT_ROOT)
+        env["GUARDGPT_AUDIT_LOG_PATH"] = str(self.audit_path)
+        env["GUARDGPT_DIAGNOSTIC_TRACE_PATH"] = str(self.trace_path)
         env["GUARDGPT_MCP_URL"] = self.url
+        env["JEV_STYLE_URL"] = jev_url
+        env["JEV_STYLE_TIMEOUT"] = "5"
+        env["JEV_STYLE_API_KEY"] = ""
 
         log_file = open(self.log_path, "wb")
         try:
@@ -113,14 +157,21 @@ class _MCPServerProcess:
 class AgentWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.jev_server = ThreadingHTTPServer(("127.0.0.1", 0), _JEVHandler)
+        cls.jev_thread = threading.Thread(target=cls.jev_server.serve_forever, daemon=True)
+        cls.jev_thread.start()
+        jev_url = f"http://127.0.0.1:{cls.jev_server.server_port}"
         cls.port = _free_port()
         cls.server = _MCPServerProcess(cls.port)
-        cls.server.start()
+        cls.server.start(jev_url)
         cls.url = cls.server.url
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.server.stop()
+        cls.jev_server.shutdown()
+        cls.jev_server.server_close()
+        cls.jev_thread.join(timeout=5)
 
     def _initial_state(self, prompt: str) -> GuardState:
         return {
@@ -135,7 +186,7 @@ class AgentWorkflowTests(unittest.TestCase):
         result_state = agent.invoke(state)
         report = build_report(result_state)
         self.assertIn(report["action"], {"ALLOW", "SANITIZE", "BLOCK"})
-        self.assertIn(report["final_status"], {"SAFE", "CAUTION", "UNSAFE"})
+        self.assertIn(report["final_status"], {"SAFE", "CAUTION", "UNSAFE", "DECISION_UNAVAILABLE"})
 
     def test_graph_blocks_prompt_injection(self) -> None:
         state = self._initial_state(

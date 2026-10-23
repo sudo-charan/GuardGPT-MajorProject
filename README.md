@@ -5,7 +5,7 @@
 
 GuardGPT combines a
 Sentence-Transformers intent classifier, a validated dataset/FAISS evidence
-layer, deterministic jailbreak patterns, a decision engine, optional
+layer, deterministic jailbreak patterns, JEV-Style prompt decisions, optional
 multi-turn history, Ollama generation, and a structured output audit.
 
 The reporting layer is observational. It does not change classification,
@@ -17,7 +17,7 @@ thresholds, temporal state, generation, output auditing, or the final
 | Area | Current implementation |
 |---|---|
 | Canonical entry point | MCP `complete_request`, used by the CLI |
-| Safety authority | `core.decision_engine.DecisionEngine` |
+| Prompt-action authority | JEV-Style local `/v1/systemone` service |
 | Embeddings | `all-MiniLM-L6-v2`, 384 dimensions |
 | Evidence | Normalized FAISS inner-product search over 19,200 records |
 | Generation and review | Ollama/Llama through `LlamaBackend` and `OutputAuditor` |
@@ -26,7 +26,8 @@ thresholds, temporal state, generation, output auditing, or the final
 
 ### Design boundaries
 
-- The existing classifier and decision thresholds remain authoritative.
+- JEV-Style explicitly selects `ALLOW`, `SANITIZE`, or `BLOCK`; other outputs fail closed.
+- Classifier, dataset, jailbreak, moderation, and history results provide decision evidence.
 - Dataset similarity is evidence, not a replacement classifier.
 - Temporal intent state is observational and is not a trained safety model.
 - Generated answers are released only after the configured output audit passes.
@@ -53,7 +54,7 @@ CompletePipeline
         +--> ConversationGuard history and temporal state, when a session exists
         |
         v
-DecisionEngine
+JEV-Style local SystemOne API
         |
         +--> ALLOW
         +--> SANITIZE
@@ -71,6 +72,14 @@ The normal `main.py` CLI starts or reuses an MCP server and calls
 canonical path for input checks, optional rewriting, generation, output review,
 and report persistence.
 
+The local JEV-Style server must be available at `JEV_STYLE_URL` (default
+`http://127.0.0.1:8765`). GuardGPT submits both its intent-classification
+question and a separate enforcement-action question. The server must return
+`answers.decision.type = "choice"` with `choice` equal to `ALLOW`, `SANITIZE`,
+or `BLOCK`; missing or unknown actions stop the request without fallback. A
+remote endpoint must be explicitly configured with `JEV_STYLE_URL` and use
+HTTPS; HTTP is accepted only for loopback hosts. Redirects are not followed.
+
 ### LangGraph compatibility path
 
 `agent/graph.py` defines a separate LangGraph workflow with these nodes:
@@ -86,10 +95,10 @@ ReceivePrompt
   -> BuildReport
 ```
 
-The nodes are MCP-only adapters. They do not implement a second classifier or
-decision engine. This graph is retained for compatibility and agent-oriented
-tests. The CLI's canonical `complete_request` path uses the complete pipeline
-directly rather than this report-only graph.
+The nodes are MCP-only adapters. The analysis tools supply evidence, and the
+decision tool asks JEV-Style for the action. This graph is retained for
+compatibility and agent-oriented tests. The CLI's canonical `complete_request`
+path uses the complete pipeline directly rather than this report-only graph.
 
 ## Repository Layout
 
@@ -137,10 +146,15 @@ model to be downloaded.
 | `GUARDGPT_DATASET` | `data/guardgpt_dataset.jsonl` | Optional dataset path override |
 | `GUARDGPT_ALLOW_MODEL_DOWNLOAD` | disabled | Permit embedding-model download |
 | `GUARDGPT_INTENT_MODEL` | `intent_classifier/best_model.pt` | Optional classifier checkpoint override |
+| `GUARDGPT_PERSIST_PROMPT_REPORTS` | `true` | Persist prompt and complete reports, which contain raw/sanitized prompt text; set `false` to omit those files |
+| `JEV_STYLE_URL` | `http://127.0.0.1:8765` | JEV endpoint; remote endpoints must be explicitly configured with HTTPS |
+| `JEV_STYLE_TIMEOUT` | `300` | JEV request timeout in seconds |
+| `JEV_STYLE_API_KEY` | unset | Optional bearer credential sent to the configured JEV endpoint |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `llama3` | Generation model |
 | `OLLAMA_AUDIT_MODEL` | generation model | Optional separate audit model |
 | `OLLAMA_TIMEOUT` | `120` | Ollama request timeout in seconds |
+| `OLLAMA_AUDIT_TIMEOUT` | `120` | Independent output-audit timeout in seconds |
 | `OLLAMA_TEMPERATURE` | `0.2` | Generation temperature |
 
 Ollama is required for answer generation, sanitize rewrites, and output
@@ -256,10 +270,9 @@ python verify_augmented_dataset.py
 
 `SafetyService.analyze()` obtains the classifier result, queries the dataset,
 applies the existing risk estimator and deterministic jailbreak patterns, and
-passes the resulting signal to `DecisionEngine`. The service also reuses the
-classifier's normalized embedding for the observational temporal layer.
-
-`DecisionEngine` is the authority for the final action:
+packages those signals as evidence. The service also reuses the classifier's
+normalized embedding for the observational temporal layer. JEV-Style receives
+that evidence and the recent session events, then selects the final action:
 
 - `ALLOW`: continue with the original request.
 - `SANITIZE`: use the existing rewrite path, recheck the rewritten prompt, and
@@ -287,6 +300,7 @@ Final statuses used by the complete pipeline are:
 - `SUPPORT`
 - `INVALID_INPUT`
 - `ERROR`
+- `DECISION_UNAVAILABLE`
 
 Risk levels are `safe`, `low`, `medium`, `high`, and `critical`. Their
 thresholds are defined by `core/risk_estimator.py`; this README does not
@@ -304,7 +318,7 @@ fail closed.
 
 `core/temporal_intent.py` implements a deterministic mathematical layer for
 session observation. It is not trained and does not replace the existing
-classifier or decision engine.
+classifier or JEV-Style action decision.
 
 For an embedding $c_t$, previous hidden state $H_{t-1}$, dataset evidence
 $R_t$, and previous intent distribution $I_{t-1}$, it applies:
@@ -357,9 +371,8 @@ Each `ConversationGuard` owns independent `H_t` and `I_t` state. `reset()`
 restores the zero hidden state and deterministic uniform six-dimensional
 probability distribution. `R_t` is the existing `dataset_match_confidence`.
 
-The temporal update is observational and session-scoped. It does not alter
-classifier output, risk thresholds, `DecisionEngine` inputs, safety actions,
-generation, or output auditing.
+The temporal update is session-scoped evidence supplied to JEV-Style. Session
+history records the action JEV-Style returned and does not override it.
 
 ## MCP Interface
 
@@ -372,8 +385,8 @@ The loopback MCP server registers:
 | `prompt_analysis` | Classifier, dataset evidence, risk, and reason-code adapter |
 | `jailbreak_detection` | Classifier plus deterministic jailbreak-pattern adapter |
 | `content_moderation` | Classifier and dataset-category moderation adapter |
-| `decision` | Thin `DecisionEngine` wrapper |
-| `audit_logger` | Backward-compatible stub; the complete pipeline writes the audit event |
+| `decision` | JEV-Style action decision with compact audit logging |
+| `audit_logger` | Writes compact report metadata to the audit log |
 
 The five report-only analysis tools remain available for compatibility. They
 are not separate safety engines and are not all executed by the canonical
@@ -395,6 +408,11 @@ One detailed prompt report per processed request. It contains `report_type:
 "prompt"`, request/audit identifiers, prompt text, intent information,
 security analysis, dataset evidence, input decision, generation metadata,
 output-audit status, final result, and optional session metadata.
+
+Set `GUARDGPT_PERSIST_PROMPT_REPORTS=false` to skip both prompt reports and
+complete reports (the latter embeds the prompt report). Compact audit events
+and session reports remain enabled; the in-memory response/report schema is
+unchanged. The default remains `true` for compatibility.
 
 ### `guardgpt_session.jsonl`
 
@@ -426,11 +444,6 @@ Run the full pytest suite:
 ```powershell
 python -m pytest tests/ -v
 ```
-
-The repository currently contains a known collection inconsistency in
-`tests/test_pipeline_with_conversation.py`: it expects
-`main.run_agent_with_history`, which is not part of the current `main.py`.
-That helper is not added by the current architecture.
 
 The test suite covers classifier/dataset integration, MCP tools and client
 behavior, LangGraph node shape, complete HTTP transport, safety decisions,
