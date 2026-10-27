@@ -1,9 +1,39 @@
 """Input checks shared by the complete request pipeline."""
-from dataclasses import asdict
 from functools import lru_cache
-from core.decision_engine import DecisionEngine
 from core.risk_estimator import estimate_risk, should_preliminarily_block
 import numpy as np
+
+
+def _self_harm_context(prompt: str) -> str | None:
+    """Label support/facilitation context as evidence, never as an action."""
+    text = " ".join(prompt.lower().split())
+    facilitation_cues = (
+        "instructions for seriously injuring", "instructions to injure",
+        "instructions for self-injury", "how to injure myself",
+        "seriously injure myself", "hide self-inflicted injuries",
+        "conceal self-inflicted injuries", "hide my injuries",
+        "conceal my injuries", "cover up self-inflicted injuries",
+    )
+    if any(cue in text for cue in facilitation_cues):
+        return "facilitation"
+
+    friend_support_cues = (
+        "help a friend", "how can i help a friend", "help someone who is suicidal",
+        "talking about suicide",
+    )
+    if any(cue in text for cue in friend_support_cues):
+        return "supporting_another_person"
+
+    if any(cue in text for cue in ("healthy ways to cope", "cope with emotional pain")):
+        return "coping_support"
+
+    support_cues = (
+        "i feel hopeless", "help me figure out what to do", "help me stay safe",
+        "thoughts of hurting myself", "suicide prevention",
+    )
+    if any(cue in text for cue in support_cues):
+        return "support_seeking"
+    return None
 
 
 @lru_cache(maxsize=1)
@@ -21,7 +51,6 @@ def resources():
 class SafetyService:
     def __init__(self, resource_provider=resources):
         self.resource_provider = resource_provider
-        self.engine = DecisionEngine(write_audit=False)
 
     def analyze(self, prompt):
         loader, classifier = self.resource_provider()
@@ -43,35 +72,64 @@ class SafetyService:
         signal = dict(prompt=prompt, intent=intent, intent_confidence=confidence,
             risk_level=risk, dataset_match_confidence=similarity,
             matched_record_id=record.get("request_id"), matched_record_intent=matched_intent,
-            category_scores=scores, reason_codes=[])
+            category_scores=scores, reason_codes=[],
+            self_harm_context=_self_harm_context(prompt))
         preliminary = should_preliminarily_block(signal)
         if patterns:
             preliminary = True
             signal["reason_codes"].extend(patterns)
-        signal["final_blocked"] = preliminary
-        signal["block_reason"] = "Input safety check triggered." if preliminary else ""
+        # These are evidence for JEV-Style. They do not decide or enforce an
+        # action in the active request pipeline.
+        signal["local_preliminary_risk"] = preliminary
         embedding = getattr(classifier, "last_embedding", None)
         signal["_temporal_embedding"] = (
             np.asarray(embedding, dtype=np.float64).copy()
             if isinstance(embedding, np.ndarray) and embedding.shape == (384,)
             else np.zeros(384, dtype=np.float64)
         )
-        decision = asdict(self.engine.decide(signal))
         attacks = list(patterns)
         if confidence >= 0.65 and intent in {"jailbreak", "prompt_injection", "harmful", "cyber_abuse", "illegal"}:
             attacks.append(intent)
         # Self-harm is a support need, not an attack on the system.
-        return dict(signal=signal, decision=decision,
+        evidence = {
+            "local_intent": intent,
+            "local_intent_confidence": confidence,
+            "local_risk_level": risk,
+            "dataset_match_confidence": similarity,
+            "matched_record_id": record.get("request_id"),
+            "category_scores": scores,
+            "deterministic_patterns": list(patterns),
+            "reason_codes": list(dict.fromkeys(signal["reason_codes"])),
+            "local_preliminary_risk": preliminary,
+        }
+        if signal["self_harm_context"] is not None:
+            evidence["self_harm_context"] = signal["self_harm_context"]
+        # Keep a retrieval label as JEV evidence only when the same existing
+        # similarity gate used for category scores accepts the match. The full
+        # matched intent remains on signal for reporting and local analysis.
+        if similarity >= threshold:
+            evidence["matched_record_intent"] = matched_intent
+        return dict(signal=signal, evidence=evidence,
                     detected_attacks=list(dict.fromkeys(attacks)),
                     matched_category_scores=raw_scores)
 
-    def apply_history(self, analysis, guard):
+    def apply_history(self, analysis, guard, action, decision_failure_reason_code=""):
+        """Record one JEV outcome while keeping history as evidence only."""
         signal = dict(analysis["signal"])
-        signal["final_blocked"] = analysis["decision"]["action"] == "BLOCK"
-        history = guard.evaluate_result(signal)  # Exactly one recorded input turn.
+        if action is None:
+            history = guard.record_jev_failure(signal, decision_failure_reason_code)
+        else:
+            history = guard.record_jev_outcome(
+                signal, action, decision_failure_reason_code
+            )  # Exactly one recorded input turn.
+        analysis["history_evidence"] = {
+            "history_triggered": history.history_triggered,
+            "history_block_reason": history.history_block_reason,
+            "unsafe_ratio": history.unsafe_ratio,
+            "session_flagged": history.session_flagged,
+        }
         if history.history_triggered:
             signal.update(history_triggered=True, history_block_reason=history.history_block_reason)
-            analysis["decision"] = asdict(self.engine.decide(signal, turn_index=history.turn_index))
         update = guard.temporal_model.update(
             signal["_temporal_embedding"], signal["dataset_match_confidence"]
         )

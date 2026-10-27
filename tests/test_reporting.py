@@ -19,32 +19,40 @@ class FakeSafety:
         }.get(prompt, "coding")
         action = "BLOCK" if blocked else "ALLOW"
         return {
-            "decision": {
-                "action": action,
+            "signal": {
                 "intent": intent,
                 "intent_confidence": 0.85,
                 "risk_level": "high" if blocked else "safe",
-                "reason_codes": ["instruction_override"] if blocked else [],
                 "category_scores": {},
                 "dataset_match_confidence": 0.42,
                 "matched_record_id": "record-1",
-                "user_message": "Blocked" if blocked else "Allowed",
-            },
-            "signal": {
                 "prompt": prompt,
                 "intent": intent,
                 "intent_confidence": 0.85,
                 "risk_level": "high" if blocked else "safe",
                 "dataset_match_confidence": 0.42,
                 "category_scores": {},
-                "final_blocked": blocked,
                 "matched_record_intent": "prompt_injection" if blocked else "safe",
+                "reason_codes": ["instruction_override"] if blocked else [],
+            },
+            "evidence": {
+                "local_intent": intent,
+                "local_intent_confidence": 0.85,
+                "local_risk_level": "high" if blocked else "safe",
+                "dataset_match_confidence": 0.42,
+                "matched_record_id": "record-1",
+                "matched_record_intent": "prompt_injection" if blocked else "safe",
+                "category_scores": {},
+                "deterministic_patterns": ["instruction_override"] if blocked else [],
+                "reason_codes": ["instruction_override"] if blocked else [],
+                "local_preliminary_risk": blocked,
             },
             "detected_attacks": ["instruction_override"] if blocked else [],
             "matched_category_scores": {},
         }
 
-    def apply_history(self, analysis, guard):
+    def apply_history(self, analysis, guard, action):
+        analysis["signal"]["final_blocked"] = action == "BLOCK"
         return guard.evaluate_result(analysis["signal"]).turn_index
 
 
@@ -56,8 +64,16 @@ class ReportingTests(unittest.TestCase):
         backend = Mock(model="test")
         auditor = Mock()
         auditor.review.return_value = AuditVerdict(safe=True, relevant=True, categories=[])
+        jev = Mock()
+        jev.decide.side_effect = lambda prompt, *_args, **_kwargs: {
+            "action": "BLOCK" if "ignore all previous" in prompt.lower() else "ALLOW",
+            "classification_category": "Prompt Injection" if "ignore all previous" in prompt.lower() else "Safe/Educational",
+            "classification_confidence": 0.9,
+            "action_confidence": 0.9,
+            "decision_provenance": {"provider": "fixture"},
+        }
         self.app = CompletePipeline(
-            FakeSafety(), backend, auditor, AuditLog(self.root / "guardgpt_audit.jsonl")
+            FakeSafety(), backend, auditor, AuditLog(self.root / "guardgpt_audit.jsonl"), jev_style=jev
         )
 
     def _records(self, name):
@@ -73,6 +89,9 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(prompt["request_id"], result["request_id"])
         self.assertEqual(prompt["prompt"]["intent"], "educational")
         self.assertEqual(prompt["input_decision"]["action"], "ALLOW")
+        self.assertEqual(prompt["jev_style"]["classification_category"], "Safe/Educational")
+        self.assertEqual(prompt["jev_style"]["action"], "ALLOW")
+        self.assertEqual(prompt["jev_style"]["decision_history"][0]["stage"], "original")
         self.assertEqual(prompt["final_result"]["status"], "SAFE")
         self.assertEqual(complete["report_type"], "complete")
         self.assertIsNone(complete["session_report"])

@@ -324,6 +324,17 @@ class IntentClassifier:
         ]
         is_safe_tech = any(kw in text_lower for kw in safe_tech_keywords)
 
+        # A defensive request to detect or prevent ransomware is not cyber
+        # abuse merely because it mentions the threat. Keep this contextual
+        # cue narrow so it only reroutes the local supporting classification.
+        ransomware_defensive = re.search(
+            r"\b(?:detect|identify|spot|recognize|recognise|protect|prevent|defend|remove|recover)\b"
+            r"[^.!?]{0,80}\bransomware\b",
+            text_lower,
+        )
+        if ransomware_defensive:
+            is_safe_tech = True
+
         # Check for explicit negation of harmful actions
         negated_re = r"\b(?:do not|don't|not|without|never|no intention to)\s+(?:want to|trying to|asking to|wish to)?\s*(?:stealing|phishing|steal|bypass|defeat)\b"
         if re.search(negated_re, text_lower):
@@ -346,7 +357,7 @@ class IntentClassifier:
             ],
             "cyber_abuse": [
                 "sql injection payload", "ddos attack target", "hack server",
-                "exploit code", "write malware", "ransomware", "trojan virus",
+                "exploit code", "write malware", "trojan virus",
                 "intercept traffic", "run spoofing script", "bypass verification",
                 "defeat two-factor", "defeat 2fa", "bypass 2fa", "bypass two-factor",
                 "stealing the current password", "steal passwords", "stealing passwords",
@@ -377,6 +388,27 @@ class IntentClassifier:
         # Defensive or educational analysis guard: e.g. "Explain the security risks of..." or "How do I protect..."
         if override_intent in unsafe_intents and is_safe_tech:
             override_intent = None
+
+        # Preserve a high-confidence local signal for direct ransomware
+        # creation/deployment requests, without treating educational mentions
+        # (for example, reporting what attackers do) as such a request.
+        ransomware_creation_or_deployment = re.search(
+            r"(?:\b(?:how\s+(?:can|do|could|would)\s+i|how\s+to|can\s+you|could\s+you|"
+            r"help\s+me|i\s+want\s+to)\b\s+|^\s*)"
+            r"(?:creat\w*|writ\w*|build\w*|develop\w*|deploy\w*|spread\w*|distribut\w*|execut\w*)"
+            r"(?:\s+(?:or|and)\s+(?:creat\w*|writ\w*|build\w*|develop\w*|deploy\w*|"
+            r"spread\w*|distribut\w*|execut\w*))*"
+            r"\s+(?:(?:a|the|some|new|working)\s+){0,2}ransomware\b",
+            text_lower,
+        )
+        ransomware_malicious_use = re.search(
+            r"\b(?:how\s+(?:can|do|could|would)\s+i|how\s+to|can\s+you|could\s+you|"
+            r"help\s+me|i\s+want\s+to)\s+use\b[^.!?]{0,40}\bransomware\b[^.!?]{0,60}"
+            r"\b(?:maliciously|against|onto|to attack|to infect|to encrypt)\b",
+            text_lower,
+        )
+        if ransomware_creation_or_deployment or ransomware_malicious_use:
+            override_intent = "cyber_abuse"
 
         if override_intent:
             best_intent = override_intent
@@ -425,10 +457,6 @@ class IntentClassifier:
     def predict(self, text: str) -> str:
         """Return only the predicted intent string."""
         return self.classify(text)["intent"]
-
-    def predict_intent(self, text: str) -> str:
-        """Alias for predict()."""
-        return self.predict(text)
 
     def classify_with_scores(self, text: str) -> dict:
         """Return predicted intent along with similarity scores for all intents."""

@@ -28,6 +28,7 @@ from core.risk_estimator import (  # noqa: E402
     LOW_SIMILARITY_THRESHOLD,
     SELF_HARM_CONFIDENCE,
     SELF_HARM_CRITICAL_CONFIDENCE,
+    SELF_HARM_HIGH_CONFIDENCE,
     SEMANTIC_BLOCK_THRESHOLD,
     SEMANTIC_RISK_THRESHOLD,
     estimate_risk,
@@ -38,9 +39,22 @@ from core.risk_estimator import (  # noqa: E402
 class EstimateRiskTests(unittest.TestCase):
     """Table-driven tests covering every branch of `estimate_risk`."""
 
-    def test_self_harm_critical_at_or_above_threshold(self) -> None:
+    def test_self_harm_risk_label_boundaries(self) -> None:
+        self.assertEqual(SELF_HARM_HIGH_CONFIDENCE, SELF_HARM_CRITICAL_CONFIDENCE)
         self.assertEqual(
-            estimate_risk("self_harm", max(SELF_HARM_CONFIDENCE, SELF_HARM_CRITICAL_CONFIDENCE), 0.0),
+            estimate_risk("self_harm", SELF_HARM_HIGH_CONFIDENCE - 0.0001, 0.0),
+            "safe",
+        )
+        self.assertEqual(
+            estimate_risk("self_harm", SELF_HARM_HIGH_CONFIDENCE, 0.0),
+            "high",
+        )
+        self.assertEqual(
+            estimate_risk("self_harm", SELF_HARM_CONFIDENCE - 0.0001, 0.0),
+            "high",
+        )
+        self.assertEqual(
+            estimate_risk("self_harm", SELF_HARM_CONFIDENCE, 0.0),
             "critical",
         )
         self.assertEqual(
@@ -48,9 +62,9 @@ class EstimateRiskTests(unittest.TestCase):
             "critical",
         )
 
-    def test_self_harm_below_gate_uses_remaining_evidence(self) -> None:
+    def test_self_harm_below_high_risk_boundary_uses_remaining_evidence(self) -> None:
         self.assertEqual(
-            estimate_risk("self_harm", SELF_HARM_CONFIDENCE - 0.01, 0.0),
+            estimate_risk("self_harm", SELF_HARM_HIGH_CONFIDENCE - 0.0001, 0.0),
             "safe",
         )
 

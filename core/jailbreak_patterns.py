@@ -70,30 +70,40 @@ def _pattern_hits(prompt_lower: str) -> list[str]:
     if ("\"" in text or "'" in text) and any(ed in text for ed in ed_triggers):
         is_educational_quote = True
 
-    if not is_educational_quote:
-        if any(p in text for p in _INSTRUCTION_OVERRIDE_PATTERNS):
-            hits.append("instruction_override")
+    detection_text = text
+    if is_educational_quote:
+        # Do not treat a quoted example as an instruction, but continue checking
+        # the rest of the prompt for separate, unquoted attack language.
+        quoted_span = re.compile(
+            r"(?<!\w)(?P<quote>[\"'])(?:(?!(?P=quote))[^\n])*?(?P=quote)(?!\w)"
+        )
+        detection_text = quoted_span.sub(
+            lambda match: " " * len(match.group(0)), text
+        )
         
-        extraction_re = r"\b(?:reveal|show|print|disclose|output|get|translate|echo|read)\s+(?:me\s+)?(?:your|the)\s+(?:hidden\s+|internal\s+|secret\s+)?(?:system|developer)\s+(?:prompt|instructions?)\b"
-        if any(p in text for p in _SYSTEM_PROMPT_PATTERNS) or re.search(extraction_re, text):
-            hits.append("system_prompt_extraction")
-            
-        if any(p in text for p in _ROLE_MANIPULATION_PATTERNS):
-            hits.append("role_manipulation")
-        if any(p in text for p in _SAFETY_BYPASS_PATTERNS):
-            hits.append("safety_bypass")
+    if any(p in detection_text for p in _INSTRUCTION_OVERRIDE_PATTERNS):
+        hits.append("instruction_override")
 
-        # Check for negation phrases (e.g. "I do not want to steal passwords")
-        negated_re = r"\b(?:do not|don't|not|without|never|no intention to)\s+(?:want to|trying to|asking to|wish to)?\s*(?:stealing|phishing|steal|bypass|defeat)\b"
-        is_negated = bool(re.search(negated_re, text))
+    extraction_re = r"\b(?:reveal|show|print|disclose|output|get|translate|echo|read)\s+(?:me\s+)?(?:your|the)\s+(?:hidden\s+|internal\s+|secret\s+)?(?:system|developer)\s+(?:prompt|instructions?)\b"
+    if any(p in detection_text for p in _SYSTEM_PROMPT_PATTERNS) or re.search(extraction_re, detection_text):
+        hits.append("system_prompt_extraction")
 
-        if not is_negated:
-            theft_re = r"\b(?:stealing|phishing|steal)\b[^.!?]{0,80}\b(?:passwords?|credentials?|tokens?)\b"
-            auth_bypass_re = r"\b(?:bypass|defeat)\b[^.!?]{0,80}\b(?:verification|two-factor|2fa|authentication)\b"
-            if re.search(theft_re, text):
-                hits.append("credential_theft_request")
-            if re.search(auth_bypass_re, text):
-                hits.append("auth_bypass_request")
+    if any(p in detection_text for p in _ROLE_MANIPULATION_PATTERNS):
+        hits.append("role_manipulation")
+    if any(p in detection_text for p in _SAFETY_BYPASS_PATTERNS):
+        hits.append("safety_bypass")
+
+    # Check for negation phrases (e.g. "I do not want to steal passwords")
+    negated_re = r"\b(?:do not|don't|not|without|never|no intention to)\s+(?:want to|trying to|asking to|wish to)?\s*(?:stealing|phishing|steal|bypass|defeat)\b"
+    is_negated = bool(re.search(negated_re, detection_text))
+
+    if not is_negated:
+        theft_re = r"\b(?:stealing|phishing|steal)\b[^.!?]{0,80}\b(?:passwords?|credentials?|tokens?)\b"
+        auth_bypass_re = r"\b(?:bypass|defeat)\b[^.!?]{0,80}\b(?:verification|two-factor|2fa|authentication)\b"
+        if re.search(theft_re, detection_text):
+            hits.append("credential_theft_request")
+        if re.search(auth_bypass_re, detection_text):
+            hits.append("auth_bypass_request")
 
     return hits
 

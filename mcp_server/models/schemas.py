@@ -103,6 +103,7 @@ class DecisionOutput(WireModel):
     detected_attacks: list[str] = Field(default_factory=list)
     sanitized_prompt: Optional[str] = None
     audit_id: Optional[str] = None
+    jev_style: Optional[dict[str, Any]] = None
     prompt_report: Optional['DecisionOutput'] = None
     session_report: Optional[SessionReport] = None
 

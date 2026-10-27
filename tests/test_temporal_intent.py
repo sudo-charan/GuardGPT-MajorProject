@@ -94,17 +94,16 @@ class TemporalIntentTests(unittest.TestCase):
             self.assertTrue(np.array_equal(left.I_t, right.I_t))
             self.assertEqual(left.g_t, right.g_t)
 
-    def test_temporal_update_is_observational(self):
+    def test_temporal_update_records_evidence_without_deciding_action(self):
         loader, classifier = Mock(), Mock()
         loader.query.return_value = {"request_id": "r", "intent": "safe", "_similarity": 0.99,
             "category_scores": {"harm": 0.0}}
         classifier.classify.return_value = {"intent": "coding", "confidence": 0.9}
         service = SafetyService(lambda: (loader, classifier))
         analysis = service.analyze("Explain lists")
-        original_action = analysis["decision"]["action"]
         guard = ConversationGuard("observational")
-        service.apply_history(analysis, guard)
-        self.assertEqual(analysis["decision"]["action"], original_action)
+        service.apply_history(analysis, guard, "ALLOW")
+        self.assertNotIn("decision", analysis)
         self.assertIsNotNone(analysis["temporal_state"])
 
     def test_input_validation(self):

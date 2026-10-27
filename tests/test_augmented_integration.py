@@ -6,7 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import faiss
 import numpy as np
@@ -150,9 +150,21 @@ class IntegrationTests(unittest.TestCase):
         payload = report.model_dump()
         self.assertEqual(payload["matched_record_intent"], "safe")
         self.assertEqual(payload["risk_level"], "safe")
-        with patch.object(decision, "_engine", return_value=self.engine):
+        jev_client = Mock()
+        jev_client.decide.return_value = {
+            "action": "ALLOW",
+            "classification_category": "Safe/Educational",
+            "classification_confidence": 0.9,
+            "action_confidence": 0.9,
+            "decision_provenance": {"provider": "fixture"},
+        }
+        with patch.object(decision, "_jev_client", return_value=jev_client):
             output = decision.decide(schemas.DecisionInput(prompt="safe example", **payload))
         self.assertEqual(output.action, "ALLOW")
+        self.assertEqual(output.jev_style["classification_category"], "Safe/Educational")
+        self.assertEqual(
+            jev_client.decide.call_args.kwargs["evidence"]["matched_record_intent"], "safe"
+        )
 
 
 if __name__ == "__main__":

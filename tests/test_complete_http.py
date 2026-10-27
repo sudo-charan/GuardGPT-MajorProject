@@ -17,7 +17,7 @@ from agent.mcp_client import call_tool, MCPToolError
 from core.llama_backend import LlamaBackend
 from core.complete_pipeline import CompletePipeline, AuditLog
 from core.output_auditor import OutputAuditor
-from tests.test_complete_pipeline import analysis
+from tests.test_complete_pipeline import analysis, jev_result
 
 
 class HTTPIntegrationTests(unittest.TestCase):
@@ -44,7 +44,12 @@ class HTTPIntegrationTests(unittest.TestCase):
             safety = Mock()
             safety.analyze.side_effect = lambda _: analysis()
             backend = LlamaBackend(base_url=f"http://127.0.0.1:{ollama.server_port}", model="fixture", timeout=5)
-            app = CompletePipeline(safety, backend, OutputAuditor(backend), AuditLog(Path(tmp)/"audit.jsonl"))
+            jev = Mock()
+            jev.decide.return_value = jev_result("ALLOW")
+            app = CompletePipeline(
+                safety, backend, OutputAuditor(backend), AuditLog(Path(tmp)/"audit.jsonl"),
+                jev_style=jev,
+            )
             sock = socket.socket()
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -64,7 +69,7 @@ class HTTPIntegrationTests(unittest.TestCase):
                     self.assertEqual(len(calls), 2)
                     self.assertEqual(calls[0]["model"], "fixture")
                     self.assertIn("format", calls[1])
-                    safety.analyze.side_effect = lambda _: analysis("BLOCK", "jailbreak")
+                    jev.decide.return_value = jev_result("BLOCK", "Jailbreak")
                     blocked = call_tool("complete_request", {"prompt": "blocked"}, url=url).data
                     self.assertFalse(blocked["allowed"])
                     self.assertEqual(len(calls), 2)

@@ -1,9 +1,9 @@
 """
 Audit Logger MCP tool - stub.
 
-The canonical writer for `logs/guardgpt_audit.jsonl` is
-`core.decision_engine.DecisionEngine._write_audit_log`, which is invoked
-inside the MCP `decision` tool on every request.
+The canonical writer for `logs/guardgpt_audit.jsonl` is the `AuditLog` used by
+`CompletePipeline`. The `decision` MCP tool is a JEV adapter and does not write
+the canonical event.
 
 This module keeps the `audit_logger` MCP tool registered for backwards
 compatibility with callers that still expect to invoke it and receive an
@@ -41,11 +41,10 @@ def log_audit_event(data: AuditLoggerInput) -> AuditLoggerOutput:
     """
     Stub audit-logger for the MCP pipeline.
 
-    `DecisionEngine._write_audit_log` (invoked via the MCP `decision` tool)
-    is the sole writer of `logs/guardgpt_audit.jsonl`. This tool exists for
-    backwards compatibility with callers that still expect to invoke an
-    `audit_logger` MCP tool and receive an `audit_id`. It mints and returns
-    a synthesized `audit_id` but does not touch the file.
+    `CompletePipeline`'s `AuditLog` writes `logs/guardgpt_audit.jsonl`. This
+    tool exists for backwards compatibility with callers that still expect to
+    invoke an `audit_logger` MCP tool and receive an `audit_id`. It mints and
+    returns a synthesized `audit_id` but does not touch the file.
     """
     log_path = _audit_log_path()
     audit_id = str(uuid.uuid4())

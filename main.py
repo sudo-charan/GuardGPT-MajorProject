@@ -3,8 +3,9 @@ import argparse
 import json
 import logging
 import os
+import socket
 from pathlib import Path
-import sys
+from urllib.parse import urlparse
 import uuid
 from dotenv import load_dotenv
 
@@ -45,14 +46,49 @@ def run_agent_with_history(agent, guard, prompt, mcp_url):
 
 
 def print_jev_style(report):
-    """Print only the concise local Jev-Style observation."""
+    """Print JEV classification separately from its authoritative action."""
     jev_style = report.get("jev_style") or {}
-    choice = jev_style.get("choice") or jev_style.get("decision")
-    confidence = jev_style.get("confidence")
-    if choice is None or confidence is None:
-        print("JEV-style: unavailable")
+    status = jev_style.get("status")
+    if status != "available":
+        code = jev_style.get("failure_reason_code")
+        print(f"JEV decision: {status or 'unavailable'}" + (f" ({code})" if code else ""))
+        decisions = jev_style.get("decision_history", [])
+        if decisions:
+            stages = [f"{item.get('stage')}: {item.get('action') or item.get('reason_code', 'invalid')}"
+                      for item in decisions]
+            print("JEV decision path: " + " → ".join(stages))
         return
-    print(f"JEV-style: {choice} | confidence: {float(confidence) * 100:.1f}%")
+    category = jev_style.get("classification_category")
+    category_confidence = jev_style.get("classification_confidence")
+    action = jev_style.get("action")
+    action_confidence = jev_style.get("action_confidence")
+    category_suffix = (
+        f" | confidence: {float(category_confidence) * 100:.1f}%"
+        if isinstance(category_confidence, (int, float)) else ""
+    )
+    action_suffix = (
+        f" | confidence: {float(action_confidence) * 100:.1f}%"
+        if isinstance(action_confidence, (int, float)) else ""
+    )
+    print(f"JEV classification: {category or 'unavailable'}{category_suffix}")
+    print(f"JEV action: {action or 'unavailable'}{action_suffix}")
+    model = jev_style.get("model")
+    if isinstance(model, str) and model:
+        print(f"JEV model: {model}")
+    probabilities = jev_style.get("action_probabilities")
+    if isinstance(probabilities, dict):
+        actions = ("ALLOW", "SANITIZE", "BLOCK")
+        values = [probabilities.get(name) for name in actions]
+        if all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               and 0.0 <= value <= 1.0 for value in values):
+            rendered = ", ".join(f"{name} {value * 100:.1f}%"
+                                  for name, value in zip(actions, values))
+            print(f"JEV action probabilities: {rendered}")
+    decisions = jev_style.get("decision_history", [])
+    if len(decisions) > 1:
+        stages = [f"{item.get('stage')}: {item.get('action') or item.get('reason_code', 'invalid')}"
+                  for item in decisions]
+        print("JEV decision path: " + " → ".join(stages))
 
 
 def print_cli_summary(report):
@@ -64,11 +100,52 @@ def print_cli_summary(report):
         f"\n[{prompt_report.get('action')} | {prompt_report.get('final_status')} "
         f"| audit: {prompt_report.get('output_audit', 'NOT_RUN')}]"
     )
+    print(
+        f"Local classifier: {prompt_report.get('intent', 'unknown')} "
+        f"({float(prompt_report.get('intent_confidence', 0.0) or 0.0) * 100:.1f}%)"
+    )
+    evidence = prompt_report.get("reasons", [])
+    if evidence:
+        print("Supporting security evidence: " + ", ".join(str(code) for code in evidence))
+    audit_codes = sorted({
+        code for attempt in prompt_report.get("audit_attempts", [])
+        for code in attempt.get("reason_codes", [])
+    })
+    if audit_codes:
+        print("Output audit reasons: " + ", ".join(audit_codes))
+    if prompt_report.get("final_status") == "SUPPORT":
+        generation = "fixed support response"
+    elif prompt_report.get("response") and prompt_report.get("output_audit") == "PASSED":
+        generation = "answer released after audit"
+    elif prompt_report.get("generation_attempts", 0):
+        generation = "answer withheld"
+    else:
+        generation = "not run"
+    print(f"Generation: {generation}")
+    error_stage = prompt_report.get("error_stage")
+    if isinstance(error_stage, str) and error_stage:
+        print(f"Processing stage: {error_stage}")
+    generation_failure = prompt_report.get("generation_failure_category")
+    generation_categories = {
+        "payload_error", "connection_error", "timeout", "transport_error", "http_error",
+        "invalid_json", "invalid_response", "incomplete_response", "empty_response",
+        "invalid_candidate", "backend_error",
+    }
+    if error_stage == "generation" and generation_failure in generation_categories:
+        status_code = prompt_report.get("generation_http_status")
+        status_suffix = (
+            f" (HTTP {status_code})"
+            if generation_failure == "http_error"
+            and isinstance(status_code, int) and not isinstance(status_code, bool)
+            and 100 <= status_code <= 599 else ""
+        )
+        print(f"Generation failure: {generation_failure}{status_suffix}")
     print_jev_style(prompt_report)
 
 def status():
     from core.llama_backend import LlamaBackend
-    import requests
+    from core.jev_style_client import JevStyleClient
+
     jsonl = Path(os.getenv("GUARDGPT_DATASET", ROOT / "data" / "guardgpt_dataset.jsonl"))
     root_jsonl = ROOT / "guardgpt_dataset.jsonl"
     result = {"data_files": {
@@ -82,8 +159,11 @@ def status():
         for name in ("guardgpt_faiss.index", "guardgpt_id_map.json")
     }
     backend = LlamaBackend()
+    jev_client = JevStyleClient()
+    result["jev_endpoint_tcp_reachable"] = _endpoint_reachable(jev_client.endpoint)
     result["generation_model"] = backend.model
     result["audit_model"] = os.getenv("OLLAMA_AUDIT_MODEL") or backend.model
+    result["installed_models"] = []
     try:
         reply = backend._session.get(backend.base_url + "/api/tags", timeout=5)
         reply.raise_for_status()
@@ -93,15 +173,32 @@ def status():
         result["models_ready"] = all(n in names or n + ":latest" in names for n in (result["generation_model"], result["audit_model"]))
     except Exception:
         result.update(ollama_reachable=False, models_ready=False)
-    result["ready_for_local_validation"] = all(result["data_files"].values()) and result["models_ready"]
+    result["ready_for_local_validation"] = (
+        all(result["data_files"].values())
+        and result["models_ready"]
+        and result["jev_endpoint_tcp_reachable"]
+    )
     return result
+
+
+def _endpoint_reachable(endpoint, timeout=5):
+    """Check TCP reachability only; this does not validate the JEV model contract."""
+    try:
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description="GuardGPT: input checks, Ollama answer, output safety audit.")
     parser.add_argument("--prompt", help="Generate one audited answer.")
     parser.add_argument("--check", action="store_true", help="Input checks only; no Ollama calls.")
     parser.add_argument("--pipeline", "--demo", action="store_true", help="Run independent input-check demo cases.")
-    parser.add_argument("--status", action="store_true", help="Check data paths and installed Ollama models.")
+    parser.add_argument("--status", action="store_true", help="Check data paths, JEV reachability, and installed Ollama models.")
     parser.add_argument("--chat", action="store_true", help="Interactive prompts with session safety history.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.ERROR)
@@ -126,7 +223,7 @@ def main():
             if args.pipeline:
                 failed = False
                 for label, prompt in DEMO:
-                    print(f"\n[{label}] {prompt}")
+                    print(f"\n[{label}]")
                     report = request(prompt, check=True)
                     print_cli_summary(report)
                     failed |= report["final_status"] == "ERROR"
@@ -142,6 +239,7 @@ def main():
             print(f"{'✓' if sys_status['data_files']['dataset'] else '✗'} System ready")
             print(f"{'✓' if health.get('version') == '2.0' else '✗'} MCP connected")
             print(f"{'✓' if sys_status['data_files']['trained_intent_model'] else '✗'} Intent model ready")
+            print(f"{'✓' if sys_status['jev_endpoint_tcp_reachable'] else '✗'} JEV endpoint TCP reachable")
             print(f"{'✓' if sys_status['ollama_reachable'] else '✗'} Ollama connected")
             print("\nSession started.")
             print("Type /help for commands.\n")
@@ -158,12 +256,12 @@ def main():
                 if prompt.strip() == "/new":
                     session_id = uuid.uuid4().hex
                     print("\n--- Session Reset ---")
-                    print("New session started. Safety history cleared.\n")
+                    print("New session started. Conversation and safety history cleared.\n")
                     continue
                 if prompt.strip() == "/help":
                     print("\n--- Available Commands ---")
                     print("  /help    Show this menu")
-                    print("  /new     Reset session safety history")
+                    print("  /new     Reset conversation and safety history")
                     print("  /status  Check system component health")
                     print("  /session Show current session analytics")
                     print("  /exit    Quit GuardGPT\n")
@@ -173,6 +271,7 @@ def main():
                     print("\n--- System Status ---")
                     print(f"Dataset:      {'OK' if s['data_files']['dataset'] else 'MISSING'}")
                     print(f"Intent Model: {'OK' if s['data_files']['trained_intent_model'] else 'MISSING'}")
+                    print(f"JEV TCP:      {'REACHABLE' if s['jev_endpoint_tcp_reachable'] else 'UNREACHABLE'}")
                     print(f"Ollama:       {'CONNECTED' if s['ollama_reachable'] else 'DISCONNECTED'}")
                     print(f"Models:       {', '.join(s['installed_models']) if s['installed_models'] else 'None'}")
                     print("---------------------\n")
@@ -191,8 +290,8 @@ def main():
                             print("----------------------\n")
                         else:
                             print("\nNo session data available.\n")
-                    except Exception as e:
-                        print(f"\nError retrieving session report: {e}\n")
+                    except Exception as error:
+                        print(f"\nError retrieving session report ({type(error).__name__}).\n")
                     continue
 
                 report = request(prompt, session_id, args.check)

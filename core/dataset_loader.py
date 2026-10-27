@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -67,7 +66,6 @@ class DatasetLoader:
         self._embeddings = None
         self._jsonl_mode = self._path.suffix.lower() == ".jsonl"
         self._loaded = False
-        self._load_time = 0.0
 
     def load(self) -> None:
         if self._loaded:
@@ -80,7 +78,6 @@ class DatasetLoader:
 
     def _load_jsonl(self) -> None:
         """Load JSONL records and use matching prebuilt artifacts when present."""
-        start = time.monotonic()
         records = self._read_jsonl_records()
         index_path = self._path.parent / "guardgpt_faiss.index"
         map_path = self._path.parent / "guardgpt_id_map.json"
@@ -93,7 +90,7 @@ class DatasetLoader:
                 )
             if self.max_records is not None:
                 raise ValueError("max_records is unsupported for a prebuilt index.")
-            self._load_jsonl_prebuilt(records, index_path, map_path, start)
+            self._load_jsonl_prebuilt(records, index_path, map_path)
             return
 
         model = _load_embedding_model(self._model_name)
@@ -107,7 +104,6 @@ class DatasetLoader:
         self._index = faiss.IndexFlatIP(embeddings.shape[1]) if faiss is not None else None
         if self._index is not None:
             self._index.add(embeddings)
-        self._load_time = time.monotonic() - start
         self._loaded = True
         logger.info("Loaded JSONL dataset: %d records", len(records))
 
@@ -149,7 +145,6 @@ class DatasetLoader:
         dataset: list[dict],
         index_path: Path,
         map_path: Path,
-        start: float,
     ) -> None:
         if self._model_name not in {MODEL_NAME, f"sentence-transformers/{MODEL_NAME}"}:
             raise ValueError(f"This index requires {MODEL_NAME}.")
@@ -195,13 +190,11 @@ class DatasetLoader:
             raise ValueError("Embedding model dimension does not match index.")
         self._model, self._index, self._records = model, index, ordered_records
         self._texts = [record["input_text"] for record in ordered_records]
-        self._load_time = time.monotonic() - start
         self._loaded = True
         logger.info("Loaded validated JSONL prebuilt index: %d records", len(ordered_records))
 
     def _load_prebuilt(self) -> None:
         """Validate the three artifacts before publishing any loaded state."""
-        start = time.monotonic()
         index_path = self._path.parent / "guardgpt_faiss.index"
         map_path = self._path.parent / "guardgpt_id_map.json"
         for path in (self._path, index_path, map_path):
@@ -267,7 +260,6 @@ class DatasetLoader:
             raise ValueError("Embedding model dimension does not match index.")
         self._model, self._index, self._records = model, index, records
         self._texts = [r["input_text"] for r in records]
-        self._load_time = time.monotonic() - start
         self._loaded = True
         logger.info("Loaded validated prebuilt index: %d records", len(records))
 
@@ -338,16 +330,8 @@ class DatasetLoader:
         self._loaded = False
 
     @property
-    def is_loaded(self) -> bool:
-        return self._loaded
-
-    @property
     def record_count(self) -> int:
         return len(self._records)
-
-    @property
-    def load_time(self) -> float:
-        return self._load_time
 
     @property
     def embedding_dimension(self) -> int:

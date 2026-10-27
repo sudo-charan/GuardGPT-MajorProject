@@ -5,29 +5,59 @@
 
 GuardGPT combines a
 Sentence-Transformers intent classifier, a validated dataset/FAISS evidence
-layer, deterministic jailbreak patterns, a decision engine, optional
-multi-turn history, Ollama generation, and a structured output audit.
+layer, deterministic jailbreak patterns, session evidence, JEV-Style action
+decisions, Ollama generation, and a structured output audit.
 
-The reporting layer is observational. It does not change classification,
-thresholds, temporal state, generation, output auditing, or the final
-`ALLOW`/`SANITIZE`/`BLOCK` decision.
+JEV-Style is the sole authority for the active pipeline's `ALLOW`, `SANITIZE`,
+or `BLOCK` action. The classifier, dataset retrieval, deterministic patterns,
+and session history supply evidence to that decision. Generation runs only
+after an `ALLOW`, including a fresh `ALLOW` after a `SANITIZE` rewrite. Every
+generated candidate must pass the configured output audit before release.
 
 ## At a Glance
 
 | Area | Current implementation |
 |---|---|
 | Canonical entry point | MCP `complete_request`, used by the CLI |
-| Safety authority | `core.decision_engine.DecisionEngine` |
+| Safety authority | JEV-Style choice response from `/v1/systemone` |
 | Embeddings | `all-MiniLM-L6-v2`, 384 dimensions |
 | Evidence | Normalized FAISS inner-product search over 19,200 records |
 | Generation and review | Ollama/Llama through `LlamaBackend` and `OutputAuditor` |
 | Session state | `ConversationGuard` history plus observational temporal state |
 | Reports | Compact audit, prompt, session, and complete JSONL streams |
 
+## JEV-Style contract and deployment
+
+The active client uses the installed local `jev_style` systemone contract. It
+asks separate choice questions for classification and action, and accepts only
+`ALLOW`, `SANITIZE`, or `BLOCK` from the action question. The default local
+endpoint is `http://127.0.0.1:8765/v1/systemone`. A `JEV_STYLE_URL` override is
+not independently verified; it must implement the same request and response
+contract. Missing or invalid action data fails closed.
+The GuardGPT client only calls this service; model release and runtime settings
+are configured on the JEV service itself.
+
+The local environment currently has `jev-style` 0.3.0 installed in
+`.jev-venv`, but `requirements.txt` does not declare it. Deployments must
+provide the matching service package separately; the dependency manifest was
+left unchanged.
+
+Reports retain their existing top-level and prompt/session fields. The existing
+`jev_style` report object gains a `decision_history` array so original and
+rewrite-recheck decisions remain distinct. Each `audit_attempts` entry gains
+`status` and `reason_codes` to distinguish candidate rejection from audit
+validation or backend failure. The MCP `DecisionOutput` adds an optional
+`jev_style` object for the same classification/action separation. Within
+`jev_style`, the legacy `decision`, `choice`, `confidence`, and `probabilities`
+aliases continue to refer to classification; consumers should use the explicit
+`classification_*` and `action_*` fields.
+
 ### Design boundaries
 
-- The existing classifier and decision thresholds remain authoritative.
-- Dataset similarity is evidence, not a replacement classifier.
+- JEV-Style's validated action is authoritative for `ALLOW`, `SANITIZE`, and
+  `BLOCK`; local classifier outputs, dataset similarity, deterministic patterns,
+  and session history are evidence only.
+- Dataset similarity is supporting evidence, not a replacement classifier.
 - Temporal intent state is observational and is not a trained safety model.
 - Generated answers are released only after the configured output audit passes.
 
@@ -53,7 +83,7 @@ CompletePipeline
         +--> ConversationGuard history and temporal state, when a session exists
         |
         v
-DecisionEngine
+JEV-Style
         |
         +--> ALLOW
         +--> SANITIZE
@@ -170,7 +200,7 @@ The chat loop also starts when no prompt or demo flag is supplied. Within chat:
 
 - `/new` starts a new session.
 - `/session` requests current session analytics.
-- `/status` checks local dependencies and Ollama.
+- `/status` checks local dependencies, JEV endpoint TCP reachability, and Ollama.
 - `/help` shows commands.
 - `/exit` leaves chat.
 
@@ -186,6 +216,9 @@ python main.py --status
 
 `--pipeline` runs the current built-in matrix: safe general, coding, prompt
 injection, harmful, self-harm support, educational, and empty-input cases.
+The status check confirms that the configured JEV host accepts a TCP connection;
+it does not send a decision request or validate model readiness. CLI decisions
+also show the reported JEV model name and action probabilities when available.
 
 ### MCP server
 
@@ -255,11 +288,13 @@ python verify_augmented_dataset.py
 ## Safety Decision Pipeline
 
 `SafetyService.analyze()` obtains the classifier result, queries the dataset,
-applies the existing risk estimator and deterministic jailbreak patterns, and
-passes the resulting signal to `DecisionEngine`. The service also reuses the
-classifier's normalized embedding for the observational temporal layer.
+collects deterministic jailbreak-pattern and session-history evidence, and
+passes the bounded evidence with the current request to JEV-Style. Local risk
+estimates are supporting evidence; they do not enforce an action. The service
+also reuses the classifier's normalized embedding for the observational
+temporal layer.
 
-`DecisionEngine` is the authority for the final action:
+JEV-Style's validated action is the authority for the final action:
 
 - `ALLOW`: continue with the original request.
 - `SANITIZE`: use the existing rewrite path, recheck the rewritten prompt, and
@@ -358,8 +393,8 @@ restores the zero hidden state and deterministic uniform six-dimensional
 probability distribution. `R_t` is the existing `dataset_match_confidence`.
 
 The temporal update is observational and session-scoped. It does not alter
-classifier output, risk thresholds, `DecisionEngine` inputs, safety actions,
-generation, or output auditing.
+classifier output, local risk evidence, JEV-Style actions, generation, or
+output auditing.
 
 ## MCP Interface
 
@@ -372,7 +407,7 @@ The loopback MCP server registers:
 | `prompt_analysis` | Classifier, dataset evidence, risk, and reason-code adapter |
 | `jailbreak_detection` | Classifier plus deterministic jailbreak-pattern adapter |
 | `content_moderation` | Classifier and dataset-category moderation adapter |
-| `decision` | Thin `DecisionEngine` wrapper |
+| `decision` | JEV-Style classification and action adapter |
 | `audit_logger` | Backward-compatible stub; the complete pipeline writes the audit event |
 
 The five report-only analysis tools remain available for compatibility. They
@@ -427,10 +462,9 @@ Run the full pytest suite:
 python -m pytest tests/ -v
 ```
 
-The repository currently contains a known collection inconsistency in
-`tests/test_pipeline_with_conversation.py`: it expects
-`main.run_agent_with_history`, which is not part of the current `main.py`.
-That helper is not added by the current architecture.
+`main.run_agent_with_history` remains as a compatibility helper for the separate
+LangGraph history tests. Canonical CLI requests use the MCP `complete_request`
+path.
 
 The test suite covers classifier/dataset integration, MCP tools and client
 behavior, LangGraph node shape, complete HTTP transport, safety decisions,

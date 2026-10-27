@@ -19,7 +19,7 @@ ContentModeration   (MCP tool)
 CombineResults
   |
   v
-Decision            (MCP tool - thin wrapper around core.decision_engine)
+  Decision            (MCP tool - JEV-Style action decision)
   |
   v
 AuditLog            (MCP tool)

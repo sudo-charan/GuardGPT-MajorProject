@@ -39,8 +39,11 @@ EDUCATIONAL_SEMANTIC_RISK_THRESHOLD = 0.80
 # Minimum dataset similarity that counts as "low risk" for non-harm intents.
 LOW_SIMILARITY_THRESHOLD = 0.40
 
-# Self-harm critical-vs-high boundary (calibrated against the legacy engine).
+# Lower boundary for high self-harm risk. The historic constant name remains
+# available for compatibility; SELF_HARM_CONFIDENCE is the high-to-critical
+# boundary and the existing support-response gate.
 SELF_HARM_CRITICAL_CONFIDENCE = 0.50
+SELF_HARM_HIGH_CONFIDENCE = SELF_HARM_CRITICAL_CONFIDENCE
 
 
 # ============================================================
@@ -79,10 +82,11 @@ def estimate_risk(
 
     Returns one of: "safe", "low", "medium", "high", "critical".
     """
-    if intent in SELF_HARM_INTENTS and intent_confidence >= SELF_HARM_CONFIDENCE:
-        if intent_confidence >= SELF_HARM_CRITICAL_CONFIDENCE:
+    if intent in SELF_HARM_INTENTS:
+        if intent_confidence >= SELF_HARM_CONFIDENCE:
             return "critical"
-        return "high"
+        if intent_confidence >= SELF_HARM_HIGH_CONFIDENCE:
+            return "high"
 
     if intent in HARM_INTENTS:
         if intent_confidence >= HIGH_RISK_INTENT_CONFIDENCE:
@@ -174,6 +178,7 @@ __all__ = [
     "EDUCATIONAL_SEMANTIC_RISK_THRESHOLD",
     "LOW_SIMILARITY_THRESHOLD",
     "SELF_HARM_CRITICAL_CONFIDENCE",
+    "SELF_HARM_HIGH_CONFIDENCE",
     "SELF_HARM_INTENTS",
     "EDUCATIONAL_INTENTS",
     "HARM_INTENTS",

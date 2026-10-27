@@ -11,6 +11,17 @@ DEFAULT_TIMEOUT = 120
 DEFAULT_TEMPERATURE = 0.2
 
 
+def _tag_generation_failure(error, category, status_code=None):
+    """Attach bounded diagnostic metadata without retaining backend text."""
+    error.generation_failure_category = category
+    if (isinstance(status_code, int) and not isinstance(status_code, bool)
+            and 100 <= status_code <= 599):
+        error.generation_http_status = status_code
+        # Preserve the attribute used by the existing rewrite diagnostics.
+        error.status_code = status_code
+    return error
+
+
 class LlamaBackend:
     """Ollama backend REST client."""
 
@@ -71,25 +82,47 @@ class LlamaBackend:
 
         try:
             response = self._session.post(url, json=payload, timeout=self.timeout)
+        except requests.exceptions.Timeout as error:
+            failure = RuntimeError("Ollama generation failed or timed out.")
+            raise _tag_generation_failure(failure, "timeout") from error
         except requests.exceptions.ConnectionError as error:
-            raise ConnectionError(
+            failure = ConnectionError(
                 "Cannot reach Ollama. Start Ollama and run python main.py --status."
-            ) from error
+            )
+            raise _tag_generation_failure(failure, "connection_error") from error
         except Exception as error:
-            raise RuntimeError("Ollama generation failed or timed out.") from error
+            status_code = getattr(error, "status_code", None)
+            category = (
+                "http_error"
+                if isinstance(status_code, int) and not isinstance(status_code, bool)
+                and 100 <= status_code <= 599
+                else "transport_error"
+            )
+            failure = RuntimeError("Ollama generation failed or timed out.")
+            raise _tag_generation_failure(failure, category, status_code) from error
 
         if response.status_code != 200:
-            raise RuntimeError(f"Ollama returned HTTP {response.status_code}. Check installed models.")
+            error = RuntimeError(f"Ollama returned HTTP {response.status_code}. Check installed models.")
+            status_code = response.status_code
+            _tag_generation_failure(error, "http_error", status_code)
+            raise error
 
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception as error:
+            failure = RuntimeError("Invalid Ollama response JSON.")
+            raise _tag_generation_failure(failure, "invalid_json") from error
         if not isinstance(data, dict) or not isinstance(data.get("response"), str):
-            raise RuntimeError("Invalid Ollama response format.")
+            failure = RuntimeError("Invalid Ollama response format.")
+            raise _tag_generation_failure(failure, "invalid_response")
         if data.get("done") is not True or data.get("done_reason") == "length":
-            raise RuntimeError("Ollama response was incomplete or exceeded the token limit.")
+            failure = RuntimeError("Ollama response was incomplete or exceeded the token limit.")
+            raise _tag_generation_failure(failure, "incomplete_response")
         generated_text = data["response"].strip()
 
         if not generated_text:
-            raise RuntimeError("Empty response received from backend.")
+            failure = RuntimeError("Empty response received from backend.")
+            raise _tag_generation_failure(failure, "empty_response")
 
         return generated_text
 
